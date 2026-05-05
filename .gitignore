@@ -1,0 +1,50 @@
+__pycache__/
+*.pyc
+
+# Windows-on-WSL metadata files
+*Zone.Identifier
+*:Zone.Identifier
+
+# StockTwits raw parquets are recoverable from data/raw/stocktwits_biotech_20260412.tar.zst
+data/raw/stocktwits/*.parquet
+data/raw/stocktwits/_tickers.txt
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+
+# Large model artifacts (predictions, checkpoints)
+*.npz
+*.pt
+*.pth
+results/**/predictions/
+results/walkforward_2015/
+
+# Large data products (CSVs and parquets in raw and processed)
+data/raw/[A-Z]*.csv
+data/raw/*.parquet
+data/raw/close_panel.csv
+data/raw/volume_panel.csv
+data/raw/fundamentals_quarterly_missing.txt
+data/raw/fundamentals_edgar_missing.txt
+data/raw/prices_universe_missing.txt
+data/raw/volatility_indices.parquet
+data/raw/prices_universe.parquet
+data/processed/biotech_snapshots.pt
+data/processed/risk_features.parquet
+
+# Local Discord/Claude inbox (not part of project)
+.claude/channels/
+
+# Backup/temp artifacts
+docs/*.md:Zone.Identifier
+
+# Large processed parquets (recoverable from raw via build scripts)
+data/processed/rolling_macro_betas.parquet
+data/macro_features_v1.parquet

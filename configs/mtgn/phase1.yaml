@@ -1,0 +1,182 @@
+# MTGN Phase 1 (qualifying exam) reference config.
+# Follows r-tgn-research-context.md Section 9 (staged plan) and
+# r-tgn-salience-gating-policy.md Section 5 (default gating config).
+
+seed: 42
+
+experiment:
+  name: mtgn_phase1_v0
+  output_dir: experiments/mtgn_phase1_v0
+
+data:
+  universe_source: static_xbi_proxy  # TODO: swap to point-in-time CRSP once WRDS access confirmed
+  tickers_file: src/mtgn/data/xbi_proxy_tickers.txt
+  start_date: "2020-01-01"
+  end_date: "2024-12-31"
+  horizon_days: 5
+  price_source: yahoo
+  volatility_indices:
+    enabled: true
+    symbols: ["^VIX", "^VXN", "^VVIX"]
+    source: yahoo
+  stocktwits:
+    # Primary trading-sentiment source. Public S3, no credentials.
+    # Reference: Li, Al Ansari, Kaufman (2025), JQD, 550M posts 2008-2022.
+    enabled: true
+    s3_bucket: stocktwits-nyu
+    s3_prefix: dataset/v1/data/csv
+    filter_to_universe: true
+    features:
+      # Phase 1 confirmed computable from the public S3 corpus (2026-04-12 smoke test):
+      - st_volume_24h
+      - st_volume_change_30d        # feeds salience-gating Trigger 2
+      - st_bullish_ratio
+      - st_sentiment_dispersion     # across anonymous user_ids
+      - st_labeled_ratio
+    # DEFERRED to Phase 2 (not in the public StockTwits S3 corpus):
+    #   - st_bullish_ratio_weighted   : follower count unavailable (user_id is anonymous int)
+    #   - min_user_account_age_days   : no account creation timestamp in corpus
+    # Mitigation path (Phase 2): backfill via live StockTwits API for a recent subset once
+    # the API tier is verified (see scripts/week1_data_verification.md #1).
+  reddit:
+    # Secondary fundamental / due-diligence source.
+    # Subreddits subject to week-1 verification (see scripts/week1_data_verification.md).
+    enabled: true
+    subreddits_primary:
+      - Biotechnology
+      - biotechplays        # quarantined; verify PRAW access with authenticated opted-in account
+      - biotech             # verify trading-focused vs career/student identity
+    subreddits_secondary:
+      - SqueezePlays
+      - wallstreetbets
+      - stocks
+    dd_filter:
+      min_body_length: 500
+      min_score: 5
+      primary_subs_only: true
+    trusted_user:
+      min_karma_in_primary_subs: 500
+      min_account_age_years: 1
+    features:
+      - reddit_post_count_24h
+      - reddit_comment_count_24h
+      - reddit_dd_count_24h
+      - reddit_dd_count_7d
+      - reddit_avg_post_length
+      - reddit_score_weighted_count
+      - reddit_trusted_user_count_7d
+      - reddit_subreddit_breadth
+    historical_sources:
+      pushshift: verify_w1
+      huggingface_dumps: verify_w1
+      forward_praw_only: fallback
+  sentiment:
+    model: yiyanghkust/finbert-tone
+    stocktwits_labels: user_declared   # use StockTwits user-tagged bullish/bearish when available
+    reddit_sentiment: finbert_on_body
+  # Feature-group policy: stocktwits and reddit features are kept as SEPARATE
+  # groups in the node feature vector. Do not concatenate into a single
+  # "social sentiment" score. Required for per-source ablations (memo Section 4).
+  catalyst_calendar:
+    fda: drugs_at_fda
+    trials: clinicaltrials_gov
+    earnings: yahoo_calendar
+
+graph:
+  mode: continuous_time
+  edges:
+    - type: return_correlation
+      window_days: 60
+      threshold: 0.3
+      update_freq: weekly
+    - type: social_comention
+      window_days: 3
+      min_copostings: 2
+      update_freq: daily
+
+model:
+  memory_dim: 128
+  time_encoding_dim: 32
+  spatial_attention:
+    num_heads: 4
+    num_neighbors: 20
+  temporal_attention:
+    num_heads: 4
+    retrieval_mode: cross_entity  # or: self_only
+    top_k: 50
+    faiss_index: hnsw
+    store_refresh_epochs: 1
+    detach_stored_keys: true
+  ranking_head:
+    hidden_dim: 64
+  risk_head:
+    enabled: true
+    quantiles: [0.05, 0.50, 0.95]
+
+store:
+  key_value_mode: raw_memory_B   # store raw s_i(t); project W_k, W_v at query time
+  gating:
+    return_trigger:
+      enabled: true
+      k_sigma: 2.0
+      use_abnormal_return: true
+      cap_pct: 0.10
+      sigma_window: 30
+    attention_trigger:
+      enabled: true
+      k_volume: 3.0
+      v_min: 10
+      volume_window: 30
+    catalyst_trigger:
+      enabled: true
+      event_types: [FDA_action, trial_readout, M_and_A, partnership, earnings]
+    delta_trigger:
+      enabled: true
+      percentile: 0.95
+      warmup_epochs: 3
+      per_stock_percentile: true
+  dedup:
+    mode: union_or
+    one_entry_per_stock_day: true
+    cooldown_days: 0
+  causality:
+    features_lag_days: 1
+    percentile_window: historical_only
+    retrieval_horizon_buffer_days: 5
+
+training:
+  epochs: 50
+  batch_size_events: 1024
+  optimizer: adamw
+  lr: 0.0005
+  weight_decay: 0.00001
+  warmup_epochs: 3
+  ranking_loss: listnet
+  quantile_loss_weight: 0.5
+  temporal_split:
+    train_end: "2023-06-30"
+    val_end: "2024-03-31"
+    test_end: "2024-12-31"
+  gradient_clip: 1.0
+  detach_memory_between_batches: true
+
+evaluation:
+  metrics: [ic, rank_ic, ndcg_10, ndcg_50, long_short_return, sharpe, max_drawdown]
+  slice_decomposition: [all_days, catalyst_window_pm5, calm_periods]
+  coverage_levels: [0.05, 0.95]
+  report_per_head_attention: true
+  ablations:
+    - name: all_four_triggers
+    - name: catalyst_only
+    - name: no_gating_design_A
+    - name: self_only_retrieval
+    - name: no_cross_entity
+    - name: no_risk_head
+    # Social-signal ablations (memo Section 4)
+    - name: dual_source_full        # StockTwits + Reddit, baseline
+    - name: stocktwits_only
+    - name: reddit_only
+    - name: reddit_dd_only          # Reddit due-diligence features only, no chatter
+    - name: no_social_features      # price + volatility indices only
+  sensitivity:
+    k_sigma: [1.5, 2.0, 2.5, 3.0]

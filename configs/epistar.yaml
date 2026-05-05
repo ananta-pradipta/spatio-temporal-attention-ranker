@@ -1,0 +1,44 @@
+# epiSTAR (Episodic Spatio-Temporal Attention Ranker) configuration.
+# All hyperparameters are echoed into the per-run JSON output.
+
+train:
+  panel_start: "2015-01-09"
+  panel_end: "2022-12-31"
+  horizon_days: 5
+  universe_csv: "data/raw/biotech_universe_v1.csv"
+  epochs: 10
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  early_stop_patience: 3
+  label_smoothing: 0.0
+  output_dir: "results/epistar"
+
+backbone:
+  feature_dim: 22
+  hidden_dim: 128
+  num_neighbors: 8
+  temporal_window: 20
+  num_heads: 4
+  num_layers: 2
+  ff_dim: 256
+  dropout: 0.1
+
+memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  retrieval_mode: "raw_key"
+  random_retrieval: false
+
+model:
+  episode_value_dim: 32   # set automatically from values; placeholder
+  cross_attn_heads: 4
+  gate_hidden_dim: 64
+  head_hidden_dim: 64
+  head_dropout: 0.1
+
+ablation:
+  disable_gate: false
+  disable_retrieval: false

@@ -1,0 +1,65 @@
+# epiSTAR-SBP v1 CONTROL config (Acceptance Criterion 1).
+# Runs the rebuilt panel (Add 1 + Add 2 + Add 3 enabled) but disables
+# retrieval and loss revisions so the headline number reproduces
+# epiSTAR-full. If this run drifts more than 5-seed standard error from
+# epiSTAR-full's published numbers, the panel build is the issue and
+# must be fixed before SBP-v1 retrieval/loss fixes are evaluated.
+
+train:
+  panel_start: "2015-01-09"
+  panel_end: "2022-12-31"
+  horizon_days: 5
+  universe_csv: "data/raw/biotech_universe_v1.csv"
+  epochs: 10
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  early_stop_patience: 3
+  correlation_window: 60
+  output_dir: "results/epistar_sbp_v1_control"
+  lambda_irf: 0.0
+  lambda_vrex: 0.0
+  lambda_alpha_prior: 0.0
+  irf_temper: 0.5
+  vrex_warmup_epochs: 10
+  cohort_num_buckets: 4
+  use_ipo_blackout: true
+  ipo_blackout_days: 21
+  use_delisting_imputation: true
+  use_macro_features: true
+  control_mode: true
+
+backbone:
+  feature_dim: 26
+  hidden_dim: 128
+  num_neighbors: 8
+  temporal_window: 20
+  num_heads: 4
+  num_layers: 2
+  ff_dim: 256
+  dropout: 0.1
+
+memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  retrieval_mode: "raw_key"
+  random_retrieval: false
+
+model:
+  cohort_dim: 4
+  dual_pool_m1: 5
+  dual_pool_m2: 3
+  tau_cohort: 0.4
+  episode_value_dim: 32
+  cross_attn_heads: 4
+  gate_hidden_dim: 64
+  head_hidden_dim: 64
+  head_dropout: 0.1
+
+ablation:
+  use_per_ticker_gate: false
+  use_two_head_xattn: false
+  use_dual_pool: false
+  disable_retrieval: false

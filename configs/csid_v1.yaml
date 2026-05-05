@@ -1,0 +1,75 @@
+# CSID v1: OW-epiSTAR v1 + duration graph (regime-blended) + CSID layer.
+# Replaces DOW v2.3's macro-duration head + lambda gate with a single
+# embedding-space residualisation. Section F (rate memory) stays disabled.
+
+train:
+  panel_start: "2015-01-09"
+  panel_end: "2022-12-31"
+  horizon_days: 5
+  universe_csv: "data/raw/biotech_universe_v1.csv"
+  epochs: 10
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  early_stop_patience: 3
+  correlation_window: 60
+  correlation_shrinkage_tau: 30.0
+  min_overlap_absolute: 5
+  output_dir: "results/csid_v1"
+  use_duration_graph: true
+  fixed_w_corr: 0.7
+  fixed_w_duration: 0.3
+  random_ipo_retrieval: false
+  disable_correlation_shrinkage: false
+
+backbone:
+  feature_dim: 22
+  hidden_dim: 128
+  num_neighbors: 8
+  temporal_window: 20
+  num_heads: 4
+  num_layers: 2
+  ff_dim: 256
+  dropout: 0.1
+
+day_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  retrieval_mode: "raw_key"
+  random_retrieval: false
+
+ipo_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  max_age_days: 756
+  random_retrieval: false
+
+model:
+  episode_value_dim: 32
+  ipo_value_dim: 32
+  cross_attn_heads: 4
+  gate_hidden_dim: 64
+  head_hidden_dim: 64
+  head_dropout: 0.1
+
+macro:
+  input_dim: 28
+  hidden_dim: 64
+  out_dim: 32
+  dropout: 0.1
+
+csid:
+  cs_struct_dim: 4
+  cs_struct_features:
+    - pc1_share_21d
+    - avg_pairwise_corr_60d
+    - dispersion_5d
+    - market_return_5d
+  m_state_dim: 16
+  gate_hidden: 32
+  gate_init_bias: -3.0
+  power_iter_steps: 1
+  eps: 1.0e-6

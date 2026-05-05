@@ -1,0 +1,52 @@
+# OW-epiSTAR v1: epiSTAR-full + age features + correlation shrinkage +
+# IPO analogue memory + dual-gated fusion. Survivorship-aware extension
+# per the OW-epiSTAR spec, focused on improving fold-3 IC where late-IPO
+# biotechs dominate the cross-section.
+
+train:
+  panel_start: "2015-01-09"
+  panel_end: "2022-12-31"
+  horizon_days: 5
+  universe_csv: "data/raw/biotech_universe_v1.csv"
+  epochs: 10
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  early_stop_patience: 3
+  correlation_window: 60
+  correlation_shrinkage_tau: 30.0
+  min_overlap_soft: 5
+  output_dir: "results/ow_epistar"
+
+backbone:
+  feature_dim: 22
+  hidden_dim: 128
+  num_neighbors: 8
+  temporal_window: 20
+  num_heads: 4
+  num_layers: 2
+  ff_dim: 256
+  dropout: 0.1
+
+day_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  retrieval_mode: "raw_key"
+  random_retrieval: false
+
+ipo_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  max_age_days: 756        # first 3 trading years; spec Section 10.2
+  random_retrieval: false
+
+model:
+  episode_value_dim: 32     # set automatically from values
+  ipo_value_dim: 32
+  cross_attn_heads: 4
+  gate_hidden_dim: 64
+  head_hidden_dim: 64
+  head_dropout: 0.1

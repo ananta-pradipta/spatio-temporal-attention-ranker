@@ -1,0 +1,33 @@
+# STAR baseline (v2 paper context). Same backbone as epiSTAR/DyReg-STAR
+# minus retrieval / dynamic graph; trained with Huber + inverse-volatility
+# loss (the v1 R-STAR recipe).
+
+train:
+  panel_start: "2015-01-09"
+  panel_end: "2022-12-31"
+  horizon_days: 5
+  universe_csv: "data/raw/biotech_universe_v1.csv"
+  epochs: 10
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  early_stop_patience: 3
+  huber_delta: 1.0
+  use_vol_weight: true
+  vol_feature_idx: 6           # realized_vol_60d index in the 22-feature panel
+  output_dir: "results/baselines_244/star"
+
+backbone:
+  feature_dim: 22
+  hidden_dim: 128
+  num_neighbors: 8
+  temporal_window: 20
+  num_heads: 4
+  num_layers: 2
+  ff_dim: 256
+  dropout: 0.1
+
+model:
+  head_hidden_dim: 64
+  head_dropout: 0.1

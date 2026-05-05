@@ -1,0 +1,97 @@
+# DOW-EFR-epiSTAR: locked DOW-epiSTAR (E + G + rate memory) + Episodic
+# Factor Repricing OVERLAY. The EFR overlay is purely deterministic by
+# default (theta computed by ridge OLS on training days, retrieved by
+# regime cosine; per-(day, ticker) lambda_efr = max_lambda *
+# confidence_t * age_gate[t, i]).
+#
+# Spec: docs/specs/dow_efr_epistar_implementation_prompt.md (latest
+# DOW-EFR fix on top of the FC-DGraph postmortem). All DOW machinery
+# matches configs/dow_epistar_v23_full.yaml.
+
+train:
+  panel_start: "2015-01-09"
+  panel_end: "2022-12-31"
+  horizon_days: 5
+  universe_csv: "data/raw/biotech_universe_v1.csv"
+  epochs: 10
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  early_stop_patience: 3
+  correlation_window: 60
+  correlation_shrinkage_tau: 30.0
+  min_overlap_absolute: 5
+  output_dir: "results/dow_efr_epistar"
+  # Locked DOW knobs (= dow_epistar_v23_full.yaml).
+  disable_macro_duration: false
+  disable_lambda_macro: false
+  disable_score_duration: false
+  shuffle_macro_state: false
+  shuffle_duration_input: false
+  random_ipo_retrieval: false
+  shuffle_age_features: false
+  disable_correlation_shrinkage: false
+  use_rate_memory: true
+  disable_alpha_rate: false
+  disable_score_rate: false
+  random_rate_retrieval: false
+  use_duration_graph: true
+  duration_graph_min_warmup_days: 0
+  duration_graph_source: "deterministic_features"
+  # EFR overlay knobs.
+  use_efr: true
+  max_lambda: 0.12
+  n_retrieved_days: 16
+  ridge_eta: 0.25
+  retrieval_temperature: 0.20
+  use_positive_factor_ic_only: true
+  age_protect_days: 252.0
+  age_protect_steepness: 60.0
+  train_efr_params: false
+  shuffle_factor_exposures: false
+
+backbone:
+  feature_dim: 22
+  hidden_dim: 128
+  num_neighbors: 8
+  temporal_window: 20
+  num_heads: 4
+  num_layers: 2
+  ff_dim: 256
+  dropout: 0.1
+
+day_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  retrieval_mode: "raw_key"
+  random_retrieval: false
+
+ipo_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  max_age_days: 756
+  random_retrieval: false
+
+rate_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  random_retrieval: false
+
+model:
+  episode_value_dim: 32
+  ipo_value_dim: 32
+  cross_attn_heads: 4
+  gate_hidden_dim: 64
+  head_hidden_dim: 64
+  head_dropout: 0.1
+  duration_dim: 32
+  duration_hidden_dim: 64
+  duration_dropout: 0.1
+  macro_dim: 32
+  macro_hidden_dim: 64
+  macro_gate_state_dim: 16
+  macro_dropout: 0.1

@@ -1,0 +1,88 @@
+# Pilot v2: Tuned GAT with feature normalization
+# Fixes from v1: lower temperature, lower lr, features now z-scored
+
+seed: 42
+
+data:
+  tickers:
+    - AMGN
+    - GILD
+    - VRTX
+    - REGN
+    - ISRG
+    - MRNA
+    - ILMN
+    - BIIB
+    - DXCM
+    - ALNY
+    - SGEN
+    - IDXX
+    - ALGN
+    - BMRN
+    - INCY
+    - TECH
+    - EXAS
+    - NTRA
+    - SRPT
+    - UTHR
+    - HZNP
+    - PCVX
+    - ARGX
+    - LEGN
+    - NBIX
+    - RARE
+    - IONS
+    - CYTK
+    - RVMD
+    - INSM
+    - ROIV
+    - RCKT
+    - KRYS
+    - CRNX
+    - DAWN
+    - SMMT
+    - TVTX
+    - FOLD
+    - BEAM
+    - APLS
+  start_date: "2022-01-01"
+  end_date: "2025-12-31"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  correlation_window: 60
+  correlation_threshold: 0.80
+
+features:
+  return_windows: [1, 5, 20]
+  volatility_window: 20
+  volume_norm_window: 20
+
+target:
+  horizon: 1
+
+model:
+  name: "TemporalGAT"
+  hidden_dim: 64
+  num_heads: 4
+  num_layers: 2
+  dropout: 0.2
+
+training:
+  train_end: "2024-06-30"
+  val_end: "2025-03-31"
+  epochs: 100
+  batch_size: 1
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  patience: 20
+  loss: "listnet"
+  listnet_temperature: 0.2
+
+evaluation:
+  metrics: [ic, rank_ic, long_short_return]
+  top_k: 5
+  bottom_k: 5
+
+logging:
+  log_dir: "logs/pilot_v2_gat"
+  print_every: 5

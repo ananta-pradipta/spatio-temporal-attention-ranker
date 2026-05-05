@@ -1,0 +1,111 @@
+# Pilot experiment configuration: Temporal GNN for Biotech Stock Ranking
+# All hyperparameters and data settings in one place.
+
+seed: 42
+
+# --- Data pipeline ---
+data:
+  # IBB top holdings (NASDAQ Biotechnology Index), roughly 30-50 tickers.
+  # This list is based on publicly available IBB holdings as of early 2026.
+  # Some tickers may have changed; yfinance will skip unavailable ones.
+  tickers:
+    - AMGN    # Amgen
+    - GILD    # Gilead Sciences
+    - VRTX    # Vertex Pharmaceuticals
+    - REGN    # Regeneron
+    - ISRG    # Intuitive Surgical
+    - MRNA    # Moderna
+    - ILMN    # Illumina
+    - BIIB    # Biogen
+    - DXCM    # DexCom
+    - ALNY    # Alnylam Pharmaceuticals
+    - SGEN    # Seagen (acquired, may fail)
+    - IDXX    # IDEXX Laboratories
+    - ALGN    # Align Technology
+    - BMRN    # BioMarin Pharmaceutical
+    - INCY    # Incyte
+    - TECH    # Bio-Techne
+    - EXAS    # Exact Sciences
+    - NTRA    # Natera
+    - SRPT    # Sarepta Therapeutics
+    - UTHR    # United Therapeutics
+    - HZNP    # Horizon Therapeutics (acquired, may fail)
+    - PCVX    # Vaxcyte
+    - ARGX    # argenx
+    - LEGN    # Legend Biotech
+    - NBIX    # Neurocrine Biosciences
+    - RARE    # Ultragenyx Pharmaceutical
+    - IONS    # Ionis Pharmaceuticals
+    - CYTK    # Cytokinetics
+    - RVMD    # Revolution Medicines
+    - INSM    # Insmed
+    - ROIV    # Roivant Sciences
+    - RCKT    # Rocket Pharmaceuticals
+    - KRYS    # Krystal Biotech
+    - CRNX    # Crinetics Pharmaceuticals
+    - DAWN    # Day One Biopharmaceuticals
+    - SMMT    # Summit Therapeutics
+    - TVTX    # Travere Therapeutics
+    - FOLD    # Amicus Therapeutics
+    - BEAM    # Beam Therapeutics
+    - APLS    # Apellis Pharmaceuticals
+
+  start_date: "2022-01-01"
+  end_date: "2025-12-31"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+
+  # Graph construction
+  correlation_window: 60       # rolling window in trading days
+  correlation_threshold: 0.80  # top percentile kept (0.80 = top 20% of edges)
+
+# --- Feature engineering ---
+features:
+  # Node features computed from price data
+  return_windows: [1, 5, 20]   # daily, weekly, monthly returns
+  volatility_window: 20        # rolling std of daily returns
+  volume_norm_window: 20       # volume relative to 20-day average
+
+# --- Target ---
+target:
+  # Next-day return rank among the universe
+  horizon: 1                   # predict rank for next N days return
+
+# --- Model ---
+model:
+  name: "TemporalGAT"         # baseline: GAT applied per snapshot
+  hidden_dim: 64
+  num_heads: 4
+  num_layers: 2
+  dropout: 0.3
+
+# --- Training ---
+training:
+  # Time-based split
+  train_end: "2024-06-30"
+  val_end: "2025-03-31"
+  # Everything after val_end is test
+
+  epochs: 100
+  batch_size: 1                # one snapshot per step (full graph)
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  patience: 15                 # early stopping patience
+
+  # Ranking loss
+  loss: "listnet"              # options: listnet, pairwise
+  listnet_temperature: 1.0
+
+# --- Evaluation ---
+evaluation:
+  metrics:
+    - ic                       # information coefficient (Pearson)
+    - rank_ic                  # Spearman rank correlation
+    - long_short_return        # top quintile minus bottom quintile
+  top_k: 5                    # for long portfolio
+  bottom_k: 5                 # for short portfolio
+
+# --- Logging ---
+logging:
+  log_dir: "logs/pilot"
+  print_every: 10              # print metrics every N epochs

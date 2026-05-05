@@ -1,0 +1,35 @@
+# DyReg-STAR (Dynamic Regime Graph Spatio-Temporal Attention Ranker)
+# Stage 1 configuration: dynamic neighbor selection, no expert heads.
+
+train:
+  panel_start: "2015-01-09"
+  panel_end: "2022-12-31"
+  horizon_days: 5
+  universe_csv: "data/raw/biotech_universe_v1.csv"
+  epochs: 10
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  early_stop_patience: 3
+  output_dir: "results/dyreg_star"
+
+backbone:
+  feature_dim: 22
+  hidden_dim: 128
+  num_neighbors: 8
+  temporal_window: 20
+  num_heads: 4
+  num_layers: 2
+  ff_dim: 256
+  dropout: 0.1
+
+dynamic_graph:
+  window_days: 60
+  top_k: 8
+  static_mix_weight: 0.0  # 0.0 = pure dynamic; >0 mixes the static mechanistic graph
+  residualize_xbi: false  # reserved for ablations
+
+model:
+  head_hidden_dim: 64
+  head_dropout: 0.1

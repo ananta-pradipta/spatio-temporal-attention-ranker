@@ -1,0 +1,29 @@
+# PhD Research: Memorizing Temporal Graph Networks (MTGN)
+# Dependencies for Phase 1 (qualifying exam) and pilot v2.
+#
+# PyTorch and PyTorch Geometric should be installed separately with the
+# correct CUDA build for your system; they are listed here for reference only:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   pip install torch-geometric
+
+# Core scientific stack
+pandas>=2.0
+numpy>=1.24,<2.3
+scipy>=1.10
+scikit-learn>=1.3
+PyYAML>=5.4
+tqdm>=4.60
+matplotlib>=3.7
+
+# Data acquisition
+yfinance>=0.2.30          # Yahoo Finance: prices, VIX / VXN / VVIX
+s3fs>=2024.1.0            # StockTwits public S3 access (no-sign-request via anon=True)
+pyarrow>=15.0             # Parquet IO
+dask[dataframe]>=2024.1.0 # Out-of-core CSV reading for the StockTwits corpus
+
+# NLP / sentiment
+transformers>=4.38        # FinBERT and biotech-sentiment models
+tokenizers>=0.15
+
+# MTGN-specific: episodic store
+faiss-cpu>=1.7.4          # HNSW kNN index for the salience-gated episodic store
