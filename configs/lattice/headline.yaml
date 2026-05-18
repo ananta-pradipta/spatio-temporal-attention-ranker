@@ -1,0 +1,56 @@
+# LATTICE headline config (locked) - Fold 1+2+3, seeds 42-46.
+train:
+  fold: 1                    # overridden by CLI --fold
+  seed: 42                   # overridden by CLI --seed
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  epochs: 10
+  early_stop_patience: 3
+  balance_loss_weight: 0.01
+  top_decile_hinge_weight: 0.05
+  output_dir: "experiments/lattice/headline"
+
+model:
+  d_model: 128
+  encoder:
+    n_heads: 4
+    n_layers: 2
+    dropout: 0.1
+    n_features: 26    # actually we use the 26 panel features (no separate ST/macro variates)
+    lookback: 60
+  aggregator:
+    n_mixing_layers: 2
+    n_attn_heads: 4
+    dropout: 0.1
+  graph:
+    macro_dim: 24
+    blend_init: 0.5
+    top_k: 8
+  macro_router:
+    macro_dim: 24
+    n_experts: 4
+    balance_loss_weight: 0.01
+    hidden_dim: 32
+  retrieval:
+    regime_key_dim: 14
+    regime_value_dim: 32
+    novelty_key_dim: 8
+    novelty_value_dim: 32
+    sector_embedding_dim: 16
+    n_sectors: 11
+    top_m: 8
+    horizon_days: 5
+    embargo_days: 5
+    n_attn_heads: 4
+  cohort:
+    n_size_deciles: 10
+    n_liquidity_deciles: 10
+    n_sectors: 11
+    n_age_buckets: 4
+    embedding_dim: 16
+  head:
+    hidden_dim: 64
+    dropout: 0.1
+    lambda_macro_init: 0.05

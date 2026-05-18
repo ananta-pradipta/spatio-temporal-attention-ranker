@@ -62,14 +62,27 @@ class DySTAGEV2Config(V2BaselineConfig):
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--fold", type=int, choices=[1, 2, 3], required=True)
+    p.add_argument("--fold", type=int, choices=[1, 2, 3, 4, 5], required=True)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--smoke", action="store_true")
+    p.add_argument("--panel_kind", type=str, default="biotech",
+                   choices=["biotech", "lattice_native"])
+    p.add_argument("--two_regime_val", action="store_true")
+    p.add_argument("--output_dir", type=str, default=None)
+    p.add_argument("--panel_end", type=str, default=None)
     args = p.parse_args()
 
     cfg = DySTAGEV2Config(fold=args.fold, seed=args.seed)
     if args.smoke:
         cfg.epochs = 2
+    cfg.panel_kind = args.panel_kind
+    cfg.two_regime_val = args.two_regime_val
+    if args.output_dir:
+        cfg.output_dir = args.output_dir
+    if args.panel_end:
+        cfg.panel_end = args.panel_end
+    elif args.panel_kind == "lattice_native":
+        cfg.panel_end = "2025-12-31"
 
     set_seeds(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -103,7 +116,29 @@ def main() -> None:
         corr_threshold=cfg.corr_threshold,
     )
     log_ret = x_raw[..., 0].astype(np.float32)
-    cache_path = Path("data/processed/dystage_graph_cache.pt")
+    # Cache is keyed by panel_kind so biotech and universal panels each get
+    # their own. The biotech cache (T=2014, N=244) would crash on the
+    # universal panel (T~2755, N~600); panel-kind-aware paths prevent that.
+    cache_suffix = "_lattice_native" if cfg.panel_kind == "lattice_native" else ""
+    # Prefer compute-node local /tmp (no quota, ~800GB) so DyStAGE runs
+    # within one sbatch share cache without consuming home quota. Falls back
+    # to home (data/processed/) if /tmp is not writable. Cache rebuild is
+    # ~3 hours on universal panel, so even within-job sharing is a big win.
+    import os as _os
+    _user = _os.environ.get("USER", "adp232")
+    tmp_dir = Path(f"/tmp/{_user}/dystage_cache")
+    cache_path_tmp = tmp_dir / f"dystage_graph_cache{cache_suffix}.pt"
+    cache_path_home = Path(f"data/processed/dystage_graph_cache{cache_suffix}.pt")
+    # Use /tmp if writable, else home.
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_path_tmp
+    except Exception:
+        cache_path = cache_path_home
+    # Backwards-compat: if /tmp doesn't have the cache but home does, use home.
+    if not cache_path.exists() and cache_path_home.exists():
+        cache_path = cache_path_home
+    print(f"[DySTAGE-v2] cache path: {cache_path}", flush=True)
     from torch_geometric.data import Data as _PygData
     graph_cache: list = []
     if cache_path.exists():
@@ -132,6 +167,45 @@ def main() -> None:
                 print(f"[DySTAGE-v2] graph cache: t={t}/{T} ({time.time()-t_graph0:.0f}s)")
             graph_cache.append(build_day_graph(t, log_ret, tradable, x, graph_cfg))
         print(f"[DySTAGE-v2] graph cache built in {time.time()-t_graph0:.0f}s")
+        # Persist the cache so subsequent runs (other seeds, other folds)
+        # don't repeat the multi-hour rebuild. Format matches the biotech
+        # cache loader: dict with "config" and "cache" keys, where each
+        # cache entry stores edge_index/weight/feat/shortest_path_len.
+        cache_payload = {
+            "config": {
+                "corr_window": graph_cfg.corr_window,
+                "corr_threshold": graph_cfg.corr_threshold,
+                "panel_kind": cfg.panel_kind,
+                "T": int(T),
+                "N": int(graph_cache[0].x.shape[0]) if T > 0 else 0,
+            },
+            "cache": [
+                {
+                    "edge_index": g.edge_index,
+                    "edge_weight": g.edge_weight,
+                    "edge_feat": g.edge_feat,
+                    "shortest_path_len": g.shortest_path_len,
+                }
+                for g in graph_cache
+            ],
+        }
+        # Use a temp path then rename, so concurrent runs don't see a
+        # partially-written file. Use the legacy zip-free pickle format
+        # because the new torch zipfile serialiser can fail on >5GB cache
+        # files (observed: "unexpected pos NNN vs NNN-104" at 5GB on GPFS).
+        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            torch.save(cache_payload, tmp_path,
+                       _use_new_zipfile_serialization=False)
+            tmp_path.replace(cache_path)
+            print(f"[DySTAGE-v2] graph cache saved to {cache_path} "
+                  f"({cache_path.stat().st_size/1e9:.1f} GB)")
+        except Exception as e:
+            print(f"[DySTAGE-v2] graph cache save FAILED: {e}; "
+                  "this run will use in-memory cache only.")
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     valid_feat_idx = torch.arange(Fdim, device=device)
     dy_args = DySTAGEArgs(

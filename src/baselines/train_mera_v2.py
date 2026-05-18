@@ -173,7 +173,7 @@ def _retrieve_topn_sklearn(pool: np.ndarray, queries: np.ndarray, k: int) -> np.
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--fold", type=int, choices=[1, 2, 3], required=True)
+    p.add_argument("--fold", type=int, choices=[1, 2, 3, 4, 5], required=True)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--smoke", action="store_true",
                    help="Limit to 2 epochs and abbreviated output.")
@@ -188,9 +188,22 @@ def main() -> None:
                    help="Override Phase 2 early-stop patience (default 1).")
     p.add_argument("--phase2_weight_decay", type=float, default=None,
                    help="Override Phase 2 weight decay (default 1e-4).")
+    p.add_argument("--panel_kind", type=str, default="biotech",
+                   choices=["biotech", "lattice_native"])
+    p.add_argument("--two_regime_val", action="store_true")
+    p.add_argument("--output_dir", type=str, default=None)
+    p.add_argument("--panel_end", type=str, default=None)
     args = p.parse_args()
 
     cfg = MERAV2Config(fold=args.fold, seed=args.seed)
+    cfg.panel_kind = args.panel_kind
+    cfg.two_regime_val = args.two_regime_val
+    if args.output_dir:
+        cfg.output_dir = args.output_dir
+    if args.panel_end:
+        cfg.panel_end = args.panel_end
+    elif args.panel_kind == "lattice_native":
+        cfg.panel_end = "2025-12-31"
     if args.smoke:
         cfg.epochs = 2
         cfg.phase1_epochs = 1
