@@ -48,14 +48,27 @@ class StockMixerV2Config(V2BaselineConfig):
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--fold", type=int, choices=[1, 2, 3], required=True)
+    p.add_argument("--fold", type=int, choices=[1, 2, 3, 4, 5], required=True)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--smoke", action="store_true")
+    p.add_argument("--panel_kind", type=str, default="biotech",
+                   choices=["biotech", "lattice_native"])
+    p.add_argument("--two_regime_val", action="store_true")
+    p.add_argument("--output_dir", type=str, default=None)
+    p.add_argument("--panel_end", type=str, default=None)
     args = p.parse_args()
 
     cfg = StockMixerV2Config(fold=args.fold, seed=args.seed)
     if args.smoke:
         cfg.epochs = 2
+    cfg.panel_kind = args.panel_kind
+    cfg.two_regime_val = args.two_regime_val
+    if args.output_dir:
+        cfg.output_dir = args.output_dir
+    if args.panel_end:
+        cfg.panel_end = args.panel_end
+    elif args.panel_kind == "lattice_native":
+        cfg.panel_end = "2025-12-31"
 
     set_seeds(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

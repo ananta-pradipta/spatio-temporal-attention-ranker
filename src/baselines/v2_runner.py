@@ -70,6 +70,12 @@ class V2BaselineConfig:
     early_stop_patience: int = 3
     temporal_window: int = 20
     output_dir: str = "results/baselines_244"
+    # Universal-panel switches added 2026-05-13. When panel_kind="lattice_native"
+    # the runner builds the 26-col S&P 500 panel instead of the biotech-244
+    # 22-col panel. When two_regime_val=True the fold split uses
+    # fold_indices_two_regime_val (val=2017H2+2018H2, two-segment train).
+    panel_kind: str = "biotech"   # "biotech" | "lattice_native"
+    two_regime_val: bool = False
 
 
 def set_seeds(seed: int) -> None:
@@ -86,7 +92,42 @@ def set_seeds(seed: int) -> None:
 
 
 def build_panel(cfg: V2BaselineConfig):
-    """Build the 244-ticker biotech panel with 22 features. Returns (x_raw, y, tickers, dates)."""
+    """Build the panel and return (x_raw, y, tickers, dates).
+
+    When cfg.panel_kind=="biotech" (default): 244-ticker biotech panel, 22 features.
+    When cfg.panel_kind=="lattice_native": ~600-ticker S&P 500 panel, 26 features
+        (matches the universal RAG-STAR sweep panel).
+    """
+    if cfg.panel_kind == "lattice_native":
+        from src.v2.data.lattice_native_panel import (
+            LatticeNativePanelConfig, build_lattice_native_panel, FEATURE_COLS,
+        )
+        panel_cfg_l = LatticeNativePanelConfig(
+            lattice_dir=Path("data/lattice/processed"),
+            start_date=cfg.panel_start,
+            end_date=cfg.panel_end,
+            horizon_days=cfg.horizon_days,
+        )
+        panel, tickers, dates = build_lattice_native_panel(panel_cfg_l)
+        # Build (T, N, F) tensors mirroring panel_to_tensors but for the
+        # lattice_native schema. Reindex by (date, ticker) and then pivot
+        # column-by-column to preserve the FEATURE_COLS order.
+        T = len(dates); N = len(tickers); F = len(FEATURE_COLS)
+        ticker_to_i = {tk: i for i, tk in enumerate(tickers)}
+        date_to_t = {d: i for i, d in enumerate(dates)}
+        x = np.zeros((T, N, F), dtype=np.float32)
+        y = np.zeros((T, N), dtype=np.float32)
+        # Vectorised fill via groupby on the long dataframe.
+        panel = panel.copy()
+        panel["t_idx"] = panel["date"].map(date_to_t).astype("int64")
+        panel["n_idx"] = panel["ticker"].map(ticker_to_i).astype("int64")
+        ti = panel["t_idx"].to_numpy()
+        ni = panel["n_idx"].to_numpy()
+        y[ti, ni] = panel["fwd_return_h"].astype(np.float32).to_numpy()
+        for f, col in enumerate(FEATURE_COLS):
+            x[ti, ni, f] = panel[col].astype(np.float32).to_numpy()
+        return x, y, tickers, dates
+    # Default: biotech-244, 22-feature panel.
     panel_cfg = EnrichedPanelConfig(
         start_date=pd.Timestamp(cfg.panel_start),
         end_date=pd.Timestamp(cfg.panel_end),
@@ -99,10 +140,19 @@ def build_panel(cfg: V2BaselineConfig):
 
 
 def build_masks(cfg: V2BaselineConfig, dates: list, tickers: list):
-    """Build tradable + label + loss masks. Same MinimalMaskConfig as train_dow_epistar."""
-    return build_minimal_masks(
-        dates, tickers, MinimalMaskConfig(horizon_days=cfg.horizon_days)
-    )
+    """Build tradable + label + loss masks. Mirrors train_dow_epistar mask config.
+
+    For the universal panel, route to the extended S&P 500 prices parquet so
+    F4/F5 dates have valid mask cells (matches train_dow_epistar.py logic).
+    """
+    mask_kwargs: dict = dict(horizon_days=cfg.horizon_days)
+    if cfg.panel_kind == "lattice_native":
+        ext_prices = Path("data/raw/sp500/prices_sp500_extended.parquet")
+        canon_prices = Path("data/raw/sp500/prices_sp500.parquet")
+        mask_kwargs["raw_prices_parquet"] = (
+            ext_prices if ext_prices.exists() else canon_prices
+        )
+    return build_minimal_masks(dates, tickers, MinimalMaskConfig(**mask_kwargs))
 
 
 def build_age_features(tradable_mask: np.ndarray, hist20: np.ndarray, hist60: np.ndarray) -> np.ndarray:
@@ -121,7 +171,20 @@ def build_age_features(tradable_mask: np.ndarray, hist20: np.ndarray, hist60: np
 
 
 def fold_split(cfg: V2BaselineConfig, dates: list):
-    """Return (train_idx, val_idx, test_idx) using v2 fold_indices."""
+    """Return (train_idx, val_idx, test_idx).
+
+    For panel_kind="lattice_native" with two_regime_val=True, uses
+    fold_indices_two_regime_val (val = 2017 H2 + 2018 H2, two-segment train).
+    For panel_kind="lattice_native" without two_regime_val, uses the
+    standard 5-fold lattice fold_indices.
+    Otherwise falls back to the biotech 3-fold v2 fold_indices.
+    """
+    if cfg.panel_kind == "lattice_native":
+        if cfg.two_regime_val:
+            from src.lattice.data.folds import fold_indices_two_regime_val
+            return fold_indices_two_regime_val(cfg.fold, dates)
+        from src.lattice.data.folds import fold_indices as lattice_fold_indices
+        return lattice_fold_indices(cfg.fold, dates)
     return fold_indices(cfg.fold, dates)
 
 

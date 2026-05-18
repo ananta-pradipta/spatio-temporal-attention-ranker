@@ -1,0 +1,89 @@
+# RAG-STAR Universe v2 with F2-targeted feature additions.
+# Same architecture, same fold protocol. Panel = lattice_native_f2 (29 cols):
+# canonical 26 + rate_beta_60d + delta_rv_20d + low_vol_decile_flag.
+#
+# Solution targets the F2 rate-stress regime per the 2026-05-13 per-feature
+# rank-IC analysis that identified realized_vol_60d, rd_to_sales, and rate-
+# direction signals as the highest-magnitude F2 predictors.
+
+train:
+  panel_kind: "lattice_native_f2"
+  panel_start: "2015-01-09"
+  panel_end: "2026-04-30"
+  horizon_days: 5
+  universe_csv: "data/raw/biotech_universe_v1.csv"
+  epochs: 10
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  early_stop_patience: 3
+  correlation_window: 60
+  correlation_shrinkage_tau: 30.0
+  min_overlap_absolute: 5
+  output_dir: "results/rag_star_universe_v2_f2feats"
+  disable_macro_duration: false
+  disable_lambda_macro: false
+  disable_score_duration: false
+  shuffle_macro_state: false
+  shuffle_duration_input: false
+  random_ipo_retrieval: false
+  shuffle_age_features: false
+  disable_correlation_shrinkage: false
+  use_rate_memory: true
+  disable_alpha_rate: false
+  disable_score_rate: false
+  random_rate_retrieval: false
+  use_duration_graph: true
+  duration_graph_min_warmup_days: 0
+  duration_graph_source: "deterministic_features"
+  graph_mode: "learned_blend"
+  universal_risk_features_parquet: "data/processed/risk_features_sp500_ext.parquet"
+  universal_macro_duration_parquet: "data/processed/macro_duration_features_sp500_ext.parquet"
+  universal_rolling_betas_parquet: "data/processed/sp500_rolling_betas_ext.parquet"
+  universal_stocktwits_features_parquet: "data/processed/stocktwits_features_sp500.parquet"
+
+backbone:
+  feature_dim: 29
+  hidden_dim: 128
+  num_neighbors: 8
+  temporal_window: 20
+  num_heads: 4
+  num_layers: 2
+  ff_dim: 256
+  dropout: 0.1
+
+day_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  retrieval_mode: "raw_key"
+  random_retrieval: false
+
+ipo_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  max_age_days: 756
+  random_retrieval: false
+
+rate_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  random_retrieval: false
+
+model:
+  episode_value_dim: 32
+  ipo_value_dim: 32
+  cross_attn_heads: 4
+  gate_hidden_dim: 64
+  head_hidden_dim: 64
+  head_dropout: 0.1
+  duration_dim: 32
+  duration_hidden_dim: 64
+  duration_dropout: 0.1
+  macro_dim: 32
+  macro_hidden_dim: 64
+  macro_gate_state_dim: 16
+  macro_dropout: 0.1

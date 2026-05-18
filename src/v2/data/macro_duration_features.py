@@ -168,6 +168,41 @@ def build_macro_duration_features(
     out["spy_ret_5d"] = np.log(spy_a / spy_a.shift(5))
     out["spy_ret_20d"] = np.log(spy_a / spy_a.shift(20))
 
+    # ---- F2-targeted regime/risk additions (pre-registered 2026-05-17).
+    # All trailing-window / contemporaneous => point-in-time safe; no
+    # forward information. Pre-registration and rationale: F2 (2021-22
+    # rate-rotation) is the binding negative fold for every model.
+
+    # (a-new) Yield-curve curvature (butterfly). Rate velocity and 2s10s/
+    # 3m10y slope are already covered by delta_* and term_* above; only
+    # curvature is net-new. Positive = humped curve, negative = bowed.
+    out["curvature_butterfly"] = (
+        2.0 * fred_aligned["DGS2"]
+        - fred_aligned["DGS3MO"]
+        - fred_aligned["DGS10"]
+    )
+
+    # (b) MOVE proxy: annualized 21d rolling std of daily 10y-yield
+    # changes (Treasury-rate realized vol). Legacy InVAR move_proxy
+    # definition; fully FRED-derived, trailing window.
+    d10_1d = fred_aligned["DGS10"].diff(1)
+    out["move_proxy"] = (
+        d10_1d.rolling(21, min_periods=10).std() * np.sqrt(252.0)
+    )
+
+    # (d) VIX term-structure: VIX3M - VIX (positive = contango/calm).
+    # Reuse the vetted construct already persisted in risk_features.
+    out["vix_term_slope"] = risk_a["vix_term_slope"]
+
+    # (c) Rolling 60d stock-bond correlation (signed; sign encodes
+    # regime). Bond return proxied from DGS10 via -D*dy (D~=7), dy in
+    # decimal. Negative = flight-to-quality (risk-off); positive =
+    # joint stock+bond drawdown (the 2022 rate-shock regime, i.e. F2).
+    bond_ret = -7.0 * d10_1d / 100.0
+    out["stockbond_corr60"] = (
+        spy_logret.rolling(60, min_periods=30).corr(bond_ret)
+    )
+
     # Persist.
     cfg.output_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(cfg.output_path)
@@ -189,6 +224,9 @@ MACRO_FEATURE_COLS_FULL = [
     "ibb_ret_5d", "ibb_ret_20d",
     "qqq_ret_5d", "qqq_ret_20d",
     "spy_ret_5d", "spy_ret_20d",
+    # F2-targeted regime/risk additions (pre-registered 2026-05-17).
+    "curvature_butterfly", "move_proxy",
+    "vix_term_slope", "stockbond_corr60",
 ]
 
 # Subset used for the macro_gate that drives lambda_macro (Section E

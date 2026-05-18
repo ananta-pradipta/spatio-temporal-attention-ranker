@@ -82,6 +82,7 @@ class STARBackbone(nn.Module):
         patches: Tensor,
         patch_mask: Tensor,
         active_mask: Tensor,
+        return_prenorm: bool = False,
     ) -> Tensor:
         """Encode one day's patches into per-ticker representations.
 
@@ -89,10 +90,18 @@ class STARBackbone(nn.Module):
             patches: [A, N+1, W, F] feature tensor for A active tickers.
             patch_mask: [A, N+1, W] bool, True where the cell is observed.
             active_mask: [num_nodes] bool, True for active tickers.
+            return_prenorm: if True, also return the PRE-CrossSectional-
+                LayerNorm representation. The CS-LN forces the cross-
+                sectional mean to a constant per day, so any pooled day
+                statistic of ``z_norm`` is day-invariant (useless for a
+                day-level pretext); the pre-norm tensor preserves the
+                day-level signal. Finetune path keeps default (False) and
+                is byte-for-byte unchanged.
 
         Returns:
             z: [num_nodes, hidden_dim] cross-sectionally layer-normalized,
-                with inactive rows zeroed.
+                with inactive rows zeroed. If ``return_prenorm`` also
+                returns the pre-CS-LN [num_nodes, hidden_dim] tensor.
         """
         cfg = self.cfg
         a, n_plus_1, w, _ = patches.shape
@@ -116,6 +125,8 @@ class STARBackbone(nn.Module):
         z_full = torch.zeros(num_nodes, d, device=z_active.device, dtype=z_active.dtype)
         z_full[active_mask] = z_active
         z_norm = self.cs_ln(z_full, active_mask)
+        if return_prenorm:
+            return z_norm, z_full
         return z_norm
 
 

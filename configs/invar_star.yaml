@@ -1,0 +1,36 @@
+# InVAR-STAR training configuration.
+# Defaults from docs/invar_star_design.md Sections 4 and 6.
+
+model:
+  lookback: 60
+  d_model: 128
+  n_heads: 4
+  n_layers: 3
+  n_experts: 4
+  top_k: 2
+  phi_dim: 64
+  n_stock: 26
+  n_macro: 24
+  noise_std: 0.5
+  expert_dropout: 0.1
+
+train:
+  n_epochs: 60
+  swa_start: 40
+  warmup_epochs: 5
+  lr: 3.0e-4
+  swa_lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  tau_start: 1.0
+  tau_end: 0.1
+
+loss:
+  lambda_mse: 1.0
+  lambda_ic: 0.5
+  # lambda_throttle = 0.0 disables the bimodal Beta(0.4, 0.6) prior on beta_t.
+  # Original spec value was 0.05; the prior was found (2026-05-10) to make
+  # beta = 0 a strong attractor regardless of the gate's bias init. Setting
+  # to zero lets MSE + Pearson IC drive beta entirely from data.
+  lambda_throttle: 0.0
+  lambda_balance: 0.01

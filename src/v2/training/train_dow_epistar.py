@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from torch import nn
 import yaml
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
@@ -91,6 +92,27 @@ class TrainConfig:
     correlation_shrinkage_tau: float = 30.0
     min_overlap_absolute: int = 5
     output_dir: str = "results/dow_epistar_v2"
+    # V-REx across macro-regime environments (ablation arm 2, 2026-05-17).
+    # vrex_beta = 0.0 -> exact original headline path (zero regression
+    # risk). > 0 -> regime-balanced batched loop with a variance-of-
+    # environment-risk penalty. Environments = KMeans clusters of the
+    # per-day episode-key regime fingerprint, fit on TRAIN days only.
+    vrex_beta: float = 0.0
+    vrex_n_envs: int = 4
+    # Two-stage pretrain plumbing (ablation arms 1/3, 2026-05-17).
+    # init_backbone_ckpt: load a pretrained STARBackbone state_dict into
+    # model.ow...backbone before finetuning (Stage-2). Empty = no-op.
+    init_backbone_ckpt: str = ""
+    # Stage-1 pretrain objective: "" = no pretrain (normal finetune);
+    # "contrastive" = arm 1 regime-contrastive InfoNCE; "adversarial" =
+    # arm 3 gradient-reversal regime-invariance. pretrain_only saves the
+    # STARBackbone state_dict and exits before finetune.
+    pretrain_objective: str = ""
+    pretrain_only: bool = False
+    pretrain_epochs: int = 10
+    pretrain_lr: float = 1e-4
+    pretrain_temp: float = 0.2
+    pretrain_n_envs: int = 4
     # Ablation flags (subset of spec Section K).
     disable_macro_duration: bool = False
     disable_lambda_macro: bool = False
@@ -134,6 +156,20 @@ class TrainConfig:
     # When True, permute the per-day macro_gate_input across days.
     # Tests whether the GraphSourceGate uses real macro regime info.
     shuffle_macro_gate: bool = False
+    # Universal-validation path overrides (Tier 1 spec). When panel_kind
+    # is "universal", the trainer routes panel build / risk / macro /
+    # rolling-betas reads to S&P 500 artefacts instead of biotech. The
+    # 22-d feature schema, 10-d rate-sensitivity vector, 28-d macro state,
+    # and 8-d episode-key risk vector are all column-name compatible with
+    # the biotech panel; only the values differ.
+    panel_kind: str = "biotech"
+    universal_prices_parquet: str = "data/raw/sp500/prices_sp500.parquet"
+    universal_fundamentals_parquet: str = "data/raw/sp500/fundamentals_sp500.parquet"
+    universal_constituents_parquet: str = "data/raw/sp500/sp500_constituents_history.parquet"
+    universal_stocktwits_features_parquet: str = "data/processed/stocktwits_features_sp500.parquet"
+    universal_risk_features_parquet: str = "data/processed/risk_features_sp500.parquet"
+    universal_macro_duration_parquet: str = "data/processed/macro_duration_features_sp500.parquet"
+    universal_rolling_betas_parquet: str = "data/processed/sp500_rolling_betas.parquet"
 
 
 def set_seeds(seed: int) -> None:
@@ -227,6 +263,53 @@ def standardize_features(x, mask, train_idx):
     return out
 
 
+def _kmeans_labels(x: np.ndarray, k: int, seed: int, iters: int = 50) -> np.ndarray:
+    """Tiny deterministic Lloyd's k-means (no sklearn dependency).
+
+    Args:
+        x: [n, d] points (already standardised).
+        k: number of clusters.
+        seed: RNG seed for reproducible init.
+        iters: max Lloyd iterations.
+
+    Returns:
+        labels: [n] int cluster assignment in [0, k).
+    """
+    rng = np.random.default_rng(seed)
+    n = x.shape[0]
+    k = max(1, min(k, n))
+    cent = x[rng.choice(n, size=k, replace=False)].copy()
+    labels = np.zeros(n, dtype=np.int64)
+    for _ in range(iters):
+        d2 = ((x[:, None, :] - cent[None, :, :]) ** 2).sum(-1)
+        new = d2.argmin(1)
+        if np.array_equal(new, labels):
+            break
+        labels = new
+        for c in range(k):
+            sel = labels == c
+            if sel.any():
+                cent[c] = x[sel].mean(0)
+    return labels
+
+
+class _GradReverseFn(torch.autograd.Function):
+    """Gradient-reversal layer (Ganin & Lempitsky 2015) for arm 3."""
+
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = lambd
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, g):
+        return g.neg() * ctx.lambd, None
+
+
+def _grad_reverse(x, lambd: float = 1.0):
+    return _GradReverseFn.apply(x, lambd)
+
+
 def warmup_cosine_lr(step, warmup, total):
     if step < warmup:
         return step / max(1, warmup)
@@ -249,22 +332,109 @@ def build_age_features_from_tradable(tradable_mask, hist20, hist60):
     return out
 
 
-def build_ipo_keys(x_raw, age_feat, risk_arr, avg_corr_60d):
-    """[T, N, 22] IPO retrieval key (same as OW v1)."""
+# IPO-key slot semantics (slots 8..18 of the 22-d key). Each entry is the
+# semantic feature name expected at that slot. Slots 0-7 are age features;
+# slots 19-21 are vix/risk/avg_corr (panel-independent).
+_IPO_KEY_SLOT_SEMANTICS = [
+    "log_market_cap",      # slot 8
+    "cash_runway_q",       # slot 9
+    "cash_to_mc",          # slot 10
+    "rd_intensity",        # slot 11
+    "st_volume_24h",       # slot 12
+    "st_bullish_ratio",    # slot 13
+    "st_labeled_ratio",    # slot 14
+    "rv_20d",              # slot 15
+    "rv_60d",              # slot 16
+    "log_return_5d",       # slot 17
+    "log_return_20d",      # slot 18
+]
+
+# Per-active-ticker feature columns used by DurationExposureEncoder.
+# 17 entries grouped as 8 fundamentals + 4 risk/liquidity + 5 social.
+_DURATION_SLOT_SEMANTICS = [
+    "log_market_cap", "cash_runway_q", "rd_intensity", "revenue_growth_yoy",
+    "cash_to_mc", "shares_outstanding_yoy", "total_assets_growth",
+    "has_fundamentals",
+    "rv_20d", "rv_60d", "log_volume_ratio_20d", "hl_range",
+    "st_volume_24h", "st_volume_change_30d", "st_bullish_ratio",
+    "st_sentiment_dispersion", "st_labeled_ratio",
+]
+
+# Map panel_kind -> {semantic_name: column_index_in_panel or None}. None
+# means "panel has no equivalent feature; zero-fill that slot". The biotech
+# 22-col schema is the original/native one; lattice_native (universal 26-col)
+# is a different ordering with no actual sentiment columns.
+_PANEL_SEMANTIC_MAP = {
+    "biotech": {
+        "log_return": 0, "log_return_5d": 1, "log_return_20d": 2,
+        "log_volume": 3, "log_volume_ratio_20d": 4,
+        "rv_20d": 5, "rv_60d": 6, "hl_range": 7, "close_to_high": 8,
+        "st_volume_24h": 9, "st_volume_change_30d": 10,
+        "st_bullish_ratio": 11, "st_sentiment_dispersion": 12,
+        "st_labeled_ratio": 13,
+        "log_market_cap": 14, "cash_runway_q": 15, "rd_intensity": 16,
+        "revenue_growth_yoy": 17, "cash_to_mc": 18,
+        "shares_outstanding_yoy": 19, "total_assets_growth": 20,
+        "has_fundamentals": 21,
+    },
+    # Universal "biotech-22-col-on-S&P-500" path (same schema as biotech).
+    "universal": None,  # set after biotech (alias)
+    # LATTICE-native 26-col schema. Sentiment/cash-runway-style features
+    # do not exist in this panel; their slots are zero-filled.
+    "lattice_native": {
+        "log_return": 0, "log_return_5d": 1, "log_return_20d": 2,
+        "log_volume": 3, "log_volume_ratio_20d": 4,
+        "rv_20d": 5, "rv_60d": 6, "hl_range": 7, "close_to_high": 8,
+        # Universal panel has these analogues; mapping by direct name match.
+        "rd_intensity": 14,        # rd_to_sales
+        "total_assets_growth": 20, # asset_growth_yoy
+        "log_market_cap": 18,
+        "has_fundamentals": 24,
+        # No equivalent in 26-col schema (sentiment + biotech-specific
+        # cash-flow ratios are absent). Trainer zero-fills these slots.
+        "cash_runway_q": None, "cash_to_mc": None,
+        "revenue_growth_yoy": None, "shares_outstanding_yoy": None,
+        "st_volume_24h": None, "st_volume_change_30d": None,
+        "st_bullish_ratio": None, "st_sentiment_dispersion": None,
+        "st_labeled_ratio": None,
+    },
+}
+_PANEL_SEMANTIC_MAP["universal"] = _PANEL_SEMANTIC_MAP["biotech"]
+_PANEL_SEMANTIC_MAP["lattice"] = _PANEL_SEMANTIC_MAP["lattice_native"]
+_PANEL_SEMANTIC_MAP["lattice_native_f2"] = _PANEL_SEMANTIC_MAP["lattice_native"]
+
+
+def _resolve_indices(panel_kind: str, semantics: list) -> list:
+    """Map [semantic_name, ...] to [(panel_idx or None), ...] for panel_kind."""
+    table = _PANEL_SEMANTIC_MAP.get(panel_kind, _PANEL_SEMANTIC_MAP["biotech"])
+    return [table.get(name, None) for name in semantics]
+
+
+def _gather_or_zero(x_raw, indices):
+    """Pull columns from x_raw at indices; None entries become zero columns.
+
+    Returns array shaped (..., len(indices)).
+    """
+    t_total, n, _ = x_raw.shape
+    out_cols = []
+    for idx in indices:
+        if idx is None:
+            out_cols.append(np.zeros((t_total, n), dtype=x_raw.dtype))
+        else:
+            out_cols.append(x_raw[..., idx])
+    return np.stack(out_cols, axis=-1)
+
+
+def build_ipo_keys(x_raw, age_feat, risk_arr, avg_corr_60d, panel_kind: str = "biotech"):
+    """[T, N, 22] IPO retrieval key. Slot mapping is panel_kind-aware."""
     t_total, n, _ = x_raw.shape
     keys = np.zeros((t_total, n, len(IPO_ANALOGUE_KEY_COLS)), dtype=np.float32)
     keys[..., 0:8] = age_feat
-    keys[..., 8] = x_raw[..., 14]
-    keys[..., 9] = x_raw[..., 15]
-    keys[..., 10] = x_raw[..., 18]
-    keys[..., 11] = x_raw[..., 16]
-    keys[..., 12] = x_raw[..., 9]
-    keys[..., 13] = x_raw[..., 11]
-    keys[..., 14] = x_raw[..., 13]
-    keys[..., 15] = x_raw[..., 5]
-    keys[..., 16] = x_raw[..., 6]
-    keys[..., 17] = x_raw[..., 1]
-    keys[..., 18] = x_raw[..., 2]
+    indices = _resolve_indices(panel_kind, _IPO_KEY_SLOT_SEMANTICS)
+    for slot, idx in enumerate(indices, start=8):
+        if idx is not None:
+            keys[..., slot] = x_raw[..., idx]
+        # else: leave as zero (pre-initialized)
     vix = risk_arr[:, 0]
     vix_mu = float(np.nanmean(vix)); vix_sd = float(np.nanstd(vix))
     if vix_sd < 1e-6: vix_sd = 1.0
@@ -275,27 +445,37 @@ def build_ipo_keys(x_raw, age_feat, risk_arr, avg_corr_60d):
     return keys
 
 
-# Per-active-ticker feature column indices from x_raw (panel) used by
-# DurationExposureEncoder. Spec Section C input list mapped to panel
-# 22-feature schema:
-#     0:log_return  1:log_return_5d  2:log_return_20d  3:log_volume
-#     4:log_volume_ratio_20d  5:rv_20d  6:rv_60d  7:hl_range
-#     8:close_to_high  9:st_volume_24h  10:st_volume_change_30d
-#     11:st_bullish_ratio  12:st_sentiment_dispersion  13:st_labeled_ratio
-#     14:log_market_cap  15:cash_runway_q  16:rd_intensity
-#     17:revenue_growth_yoy  18:cash_to_mc  19:shares_outstanding_yoy
-#     20:total_assets_growth  21:has_fundamentals
+# Backwards-compat module-level constant (biotech ordering). Live code paths
+# should call resolve_duration_indices(panel_kind) instead.
 DURATION_PANEL_COL_IDX = [
-    14, 15, 16, 17, 18, 19, 20, 21,   # fundamentals (8)
-    5, 6, 4, 7,                        # risk/liquidity (4)
-    9, 10, 11, 12, 13,                 # social (5)
+    14, 15, 16, 17, 18, 19, 20, 21,
+    5, 6, 4, 7,
+    9, 10, 11, 12, 13,
 ]
-# Followed by 8 age features and 10 rolling-beta features assembled at
-# runtime. Total: 17 + 8 + 10 = 35.
 DURATION_INPUT_DIM = len(DURATION_PANEL_COL_IDX) + 8 + len(ROLLING_BETA_COLS)
 
 
-def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
+def resolve_duration_indices(panel_kind: str) -> list:
+    """Per-panel-kind resolved duration column indices (None = zero-fill)."""
+    return _resolve_indices(panel_kind, _DURATION_SLOT_SEMANTICS)
+
+
+def main(
+    cfg_path: str,
+    fold: int,
+    seed: int,
+    smoke: bool = False,
+    epochs_override: int | None = None,
+    use_final_state: bool = False,
+    output_dir_override: str | None = None,
+    reverse_time_val: bool = False,
+    two_regime_val: bool = False,
+    vrex_beta: float | None = None,
+    vrex_n_envs: int | None = None,
+    init_backbone_ckpt: str | None = None,
+    pretrain_objective: str | None = None,
+    pretrain_only: bool = False,
+) -> None:
     """Train DOW-epiSTAR v2 on one (fold, seed) pair."""
     with open(cfg_path) as f:
         raw = yaml.safe_load(f)
@@ -305,6 +485,17 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
     disable_day_retrieval_flag = train_kwargs.pop("disable_day_retrieval", False)
     disable_ipo_retrieval_flag = train_kwargs.pop("disable_ipo_retrieval", False)
     train_cfg = TrainConfig(**{**train_kwargs, "fold": fold, "seed": seed})
+    # CLI overrides for the 2026-05-17 pretrain/V-REx ablation arms.
+    if vrex_beta is not None:
+        train_cfg.vrex_beta = float(vrex_beta)
+    if vrex_n_envs is not None:
+        train_cfg.vrex_n_envs = int(vrex_n_envs)
+    if init_backbone_ckpt is not None:
+        train_cfg.init_backbone_ckpt = str(init_backbone_ckpt)
+    if pretrain_objective is not None:
+        train_cfg.pretrain_objective = str(pretrain_objective)
+    if pretrain_only:
+        train_cfg.pretrain_only = True
     backbone_cfg = STARBackboneConfig(**raw.get("backbone", {}))
     day_mem_cfg = EpisodeMemoryConfig(**raw.get("day_memory", {}))
     ipo_mem_kwargs = dict(raw.get("ipo_memory", {}))
@@ -357,32 +548,160 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
     )
     if smoke:
         train_cfg.epochs = 2
+    if epochs_override is not None:
+        train_cfg.epochs = epochs_override
+        train_cfg.early_stop_patience = epochs_override + 10
+    if output_dir_override is not None:
+        train_cfg.output_dir = output_dir_override
 
     set_seeds(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[DOW-epiSTAR-v2] fold={fold} seed={seed} device={device}")
 
-    panel_cfg = EnrichedPanelConfig(
-        start_date=pd.Timestamp(train_cfg.panel_start),
-        end_date=pd.Timestamp(train_cfg.panel_end),
-        horizon_days=train_cfg.horizon_days,
-        universe_csv=Path(train_cfg.universe_csv),
-    )
-    panel, tickers, dates = build_enriched_panel(panel_cfg)
-    tens = panel_to_tensors(panel, tickers, dates)
+    if train_cfg.panel_kind == "universal":
+        from src.v2.data.universal_panel import (
+            UniversalPanelConfig, build_universal_panel,
+        )
+        panel_cfg_u = UniversalPanelConfig(
+            prices_parquet=Path(train_cfg.universal_prices_parquet),
+            fundamentals_parquet=Path(train_cfg.universal_fundamentals_parquet),
+            constituents_parquet=Path(train_cfg.universal_constituents_parquet),
+            stocktwits_features_parquet=Path(train_cfg.universal_stocktwits_features_parquet),
+            start_date=train_cfg.panel_start,
+            end_date=train_cfg.panel_end,
+            horizon_days=train_cfg.horizon_days,
+        )
+        panel, tickers, dates = build_universal_panel(panel_cfg_u)
+        print(f"[DOW-epiSTAR-v2] panel_kind=universal (S&P 500)")
+    elif train_cfg.panel_kind == "lattice":
+        from src.v2.data.lattice_panel import (
+            LatticePanelConfig, build_lattice_panel,
+        )
+        panel_cfg_l = LatticePanelConfig(
+            lattice_dir=Path("data/lattice/processed"),
+            stocktwits_features_parquet=Path(
+                train_cfg.universal_stocktwits_features_parquet,
+            ),
+            start_date=train_cfg.panel_start,
+            end_date=train_cfg.panel_end,
+            horizon_days=train_cfg.horizon_days,
+        )
+        panel, tickers, dates = build_lattice_panel(panel_cfg_l)
+        print(f"[DOW-epiSTAR-v2] panel_kind=lattice (RAG-STAR Universe; "
+              f"LATTICE 26-col panel mapped to v2 22-col schema)")
+    elif train_cfg.panel_kind == "lattice_native":
+        import os as _os
+        from src.v2.data.lattice_native_panel import (
+            LatticeNativePanelConfig, build_lattice_native_panel,
+        )
+        lattice_dir = Path(_os.environ.get(
+            "LATTICE_PROCESSED_DIR", "data/lattice/processed",
+        ))
+        panel_cfg_ln = LatticeNativePanelConfig(
+            lattice_dir=lattice_dir,
+            start_date=train_cfg.panel_start,
+            end_date=train_cfg.panel_end,
+            horizon_days=train_cfg.horizon_days,
+        )
+        panel, tickers, dates = build_lattice_native_panel(panel_cfg_ln)
+        print(f"[DOW-epiSTAR-v2] panel_kind=lattice_native; reading panel "
+              f"from {lattice_dir}")
+    elif train_cfg.panel_kind == "lattice_native_f2":
+        import os as _os
+        from src.v2.data.lattice_native_f2_panel import (
+            LatticeNativeF2PanelConfig, build_lattice_native_f2_panel,
+        )
+        lattice_dir = Path(_os.environ.get(
+            "LATTICE_PROCESSED_DIR", "data/lattice_f2feats/processed",
+        ))
+        panel_cfg_lnf2 = LatticeNativeF2PanelConfig(
+            lattice_dir=lattice_dir,
+            start_date=train_cfg.panel_start,
+            end_date=train_cfg.panel_end,
+            horizon_days=train_cfg.horizon_days,
+        )
+        panel, tickers, dates = build_lattice_native_f2_panel(panel_cfg_lnf2)
+        print(f"[DOW-epiSTAR-v2] panel_kind=lattice_native_f2; reading 29-col "
+              f"F2-features panel from {lattice_dir}")
+    else:
+        panel_cfg = EnrichedPanelConfig(
+            start_date=pd.Timestamp(train_cfg.panel_start),
+            end_date=pd.Timestamp(train_cfg.panel_end),
+            horizon_days=train_cfg.horizon_days,
+            universe_csv=Path(train_cfg.universe_csv),
+        )
+        panel, tickers, dates = build_enriched_panel(panel_cfg)
+    if train_cfg.panel_kind in ("lattice_native", "lattice_native_f2"):
+        # Native panel paths: avoid the module-level FEATURE_COLS
+        # (the biotech 22-col list) and build tensors inline against the
+        # appropriate column ordering. lattice_native_f2 selects the 29-col
+        # F2-feature schema, lattice_native the canonical 26-col schema.
+        if train_cfg.panel_kind == "lattice_native_f2":
+            from src.v2.data.lattice_native_f2_panel import (
+                FEATURE_COLS as _NAT_COLS,
+            )
+        else:
+            from src.v2.data.lattice_native_panel import (
+                FEATURE_COLS as _NAT_COLS,
+            )
+        ticker_to_idx = {t: i for i, t in enumerate(tickers)}
+        date_to_idx = {d: i for i, d in enumerate(dates)}
+        T, N, F = len(dates), len(tickers), len(_NAT_COLS)
+        x = np.zeros((T, N, F), dtype=np.float32)
+        y = np.zeros((T, N), dtype=np.float32)
+        mask = np.zeros((T, N), dtype=bool)
+        ti = panel["ticker"].map(ticker_to_idx).to_numpy()
+        di = panel["date"].map(date_to_idx).to_numpy()
+        x[di, ti] = panel[_NAT_COLS].to_numpy(dtype=np.float32)
+        y[di, ti] = panel["fwd_return_h"].to_numpy(dtype=np.float32)
+        mask[di, ti] = True
+        tens = {"x": x, "y": y, "mask": mask,
+                "tickers": tickers, "dates": dates}
+    else:
+        tens = panel_to_tensors(panel, tickers, dates)
     x_raw = tens["x"]; y = tens["y"]
     print(f"[DOW-epiSTAR-v2] panel: T={x_raw.shape[0]} N={x_raw.shape[1]} F={x_raw.shape[2]}")
     if x_raw.shape[1] < 50:
         raise RuntimeError("Panel too small")
 
+    # For S&P 500 / LATTICE panels, override the BIOTECH default
+    # raw_prices_parquet with the SP500 prices file. The biotech default only
+    # covers ~2018-2022 and lacks F4/F5 dates, which made tradable masks
+    # all-False for fold 4 and 5 (silently producing val/test IC=0).
+    minimal_mask_cfg_kwargs = dict(horizon_days=train_cfg.horizon_days)
+    if train_cfg.panel_kind in ("universal", "lattice", "lattice_native", "lattice_native_f2"):
+        from pathlib import Path as _P
+        ext_prices = _P("data/raw/sp500/prices_sp500_extended.parquet")
+        canon_prices = _P(train_cfg.universal_prices_parquet)
+        minimal_mask_cfg_kwargs["raw_prices_parquet"] = (
+            ext_prices if ext_prices.exists() else canon_prices
+        )
     mm = build_minimal_masks(
-        dates, tickers, MinimalMaskConfig(horizon_days=train_cfg.horizon_days)
+        dates, tickers, MinimalMaskConfig(**minimal_mask_cfg_kwargs),
     )
     tradable = mm["tradable_mask"]; loss_mask = mm["loss_mask"]
     hist20 = mm["history_valid_20d"]; hist60 = mm["history_valid_60d"]
     print(f"[DOW-epiSTAR-v2] tradable_cells={int(tradable.sum())} loss_cells={int(loss_mask.sum())}")
 
-    train_idx, val_idx, test_idx = fold_indices(fold, dates)
+    if train_cfg.panel_kind in ("lattice", "lattice_native", "lattice_native_f2"):
+        if reverse_time_val and two_regime_val:
+            raise ValueError("--reverse_time_val and --two_regime_val are mutually exclusive")
+        if two_regime_val:
+            from src.lattice.data.folds import (
+                fold_indices_two_regime_val as lattice_fold_indices,
+            )
+            print("[DOW-epiSTAR-v2] two_regime_val=True; val=2017 H2 + 2018 H2 (calm + vol-spike mix)")
+        elif reverse_time_val:
+            from src.lattice.data.folds import (
+                fold_indices_reverse_val as lattice_fold_indices,
+            )
+            print("[DOW-epiSTAR-v2] reverse_time_val=True; val=2017, two-segment train")
+        else:
+            from src.lattice.data.folds import fold_indices as lattice_fold_indices
+        train_idx, val_idx, test_idx = lattice_fold_indices(fold, dates)
+        print(f"[DOW-epiSTAR-v2] using LATTICE FOLDS (F1-F5 available)")
+    else:
+        train_idx, val_idx, test_idx = fold_indices(fold, dates)
     print(f"[DOW-epiSTAR-v2] fold {fold}: train={len(train_idx)} val={len(val_idx)} test={len(test_idx)}")
 
     x = standardize_features(x_raw, tradable, train_idx).astype(np.float32)
@@ -404,6 +723,22 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
     day_keys, _ = build_episode_keys(
         dates=dates, log_returns=x_raw[..., 0], mask=tradable, cfg=EpisodeKeyConfig(),
     )
+    # V-REx (arm 2): assign each TRAIN day to a macro-regime environment
+    # via k-means on the standardised episode-key regime fingerprint.
+    # Train-only fit + train-only standardisation => leakage-safe. The
+    # full-length array carries -1 for non-train days.
+    vrex_env_of_day = np.full(len(dates), -1, dtype=np.int64)
+    if train_cfg.vrex_beta > 0:
+        fp = np.nan_to_num(day_keys.astype(np.float64), nan=0.0)
+        fp_tr = fp[train_idx]
+        mu = fp_tr.mean(0); sd = fp_tr.std(0)
+        sd = np.where(sd < 1e-6, 1.0, sd)
+        fp_z = (fp_tr - mu) / sd
+        lbl = _kmeans_labels(fp_z, train_cfg.vrex_n_envs, seed)
+        vrex_env_of_day[train_idx] = lbl
+        _, cnts = np.unique(lbl, return_counts=True)
+        print(f"[DOW-epiSTAR-v2] V-REx beta={train_cfg.vrex_beta} "
+              f"n_envs={train_cfg.vrex_n_envs} env sizes={cnts.tolist()}")
     feature_idx = [0, 1, 5, 6]
     n_summary = 2 * len(feature_idx) + 1
     day_values = np.zeros((len(dates), day_keys.shape[1] + n_summary), dtype=np.float32)
@@ -418,11 +753,17 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
         day_values[t, -1] = float(m.sum()) / 250.0
 
     # IPO keys + values.
-    risk_arr = pd.read_parquet("data/processed/risk_features.parquet").reindex(
+    risk_path = (train_cfg.universal_risk_features_parquet
+                  if train_cfg.panel_kind in ("universal", "lattice")
+                  else "data/processed/risk_features.parquet")
+    risk_arr = pd.read_parquet(risk_path).reindex(
         pd.to_datetime(dates)
     ).ffill().bfill().to_numpy(dtype=np.float32)
     avg_corr_60d = day_keys[:, EPISODE_KEY_COLS.index("cs_avg_pairwise_corr_60d")]
-    ipo_keys = build_ipo_keys(x_raw, age_feat, risk_arr, avg_corr_60d)
+    ipo_keys = build_ipo_keys(
+        x_raw, age_feat, risk_arr, avg_corr_60d,
+        panel_kind=train_cfg.panel_kind,
+    )
     ipo_value_extras = np.zeros((len(dates), x_raw.shape[1], 1), dtype=np.float32)
     ipo_value_extras[..., 0] = y
     ipo_values = np.concatenate([ipo_keys, ipo_value_extras], axis=-1)
@@ -443,7 +784,10 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
     print(f"[DOW-epiSTAR-v2] IPO memory entries: {len(flat_keys)}")
 
     # DOW v2 macro features.
-    macro_path = Path("data/processed/macro_duration_features.parquet")
+    if train_cfg.panel_kind in ("universal", "lattice"):
+        macro_path = Path(train_cfg.universal_macro_duration_parquet)
+    else:
+        macro_path = Path("data/processed/macro_duration_features.parquet")
     if not macro_path.exists():
         print("[DOW-epiSTAR-v2] macro parquet missing; building...")
         build_macro_duration_features()
@@ -496,7 +840,10 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
         macro_arr_for_graph_gate = macro_arr
 
     # Rolling betas.
-    betas_path = Path("data/processed/rolling_macro_betas.parquet")
+    if train_cfg.panel_kind in ("universal", "lattice"):
+        betas_path = Path(train_cfg.universal_rolling_betas_parquet)
+    else:
+        betas_path = Path("data/processed/rolling_macro_betas.parquet")
     if not betas_path.exists():
         print("[DOW-epiSTAR-v2] rolling betas parquet missing; building...")
         build_rolling_betas()
@@ -518,8 +865,10 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
     print(f"[DOW-epiSTAR-v2] rolling betas: shape={betas_std.shape}")
 
     # Build duration input tensor [T, N, DURATION_INPUT_DIM].
+    duration_indices = resolve_duration_indices(train_cfg.panel_kind)
+    duration_panel_block = _gather_or_zero(x, duration_indices).astype(np.float32)
     duration_input_full = np.concatenate(
-        [x[..., DURATION_PANEL_COL_IDX], age_feat, betas_std], axis=-1
+        [duration_panel_block, age_feat, betas_std], axis=-1
     ).astype(np.float32)
     if train_cfg.shuffle_duration_input:
         rng3 = np.random.default_rng(seed + 2000)
@@ -671,6 +1020,14 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
     model = DOWEpiSTAR(
         dow_cfg, day_key_dim=day_keys.shape[1], ipo_key_dim=ipo_keys.shape[-1],
     ).to(device)
+    # Stage-2 of two-stage pretrain (arms 1/3): warm-start the STAR
+    # backbone from a contrastively / adversarially pretrained encoder.
+    if train_cfg.init_backbone_ckpt:
+        sd = torch.load(train_cfg.init_backbone_ckpt, map_location=device)
+        missing, unexpected = model.ow.backbone.load_state_dict(sd, strict=False)
+        print(f"[DOW-epiSTAR-v2] loaded backbone ckpt "
+              f"{train_cfg.init_backbone_ckpt} "
+              f"(missing={len(missing)} unexpected={len(unexpected)})")
     if dow_cfg.use_rate_memory:
         model.rate_memory.populate(
             keys=rate_keys, values=rate_values,
@@ -736,6 +1093,13 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
         rho_shrunk[~tradable[t], :] = -np.inf
         rho_shrunk[:, ~tradable[t]] = -np.inf
         return rho_shrunk.astype(np.float32)
+
+    # Stage-1 pretrain capture hook (arms 1/3). When ["on"] is True the
+    # SAME forward_one_day patch-construction prologue is reused (zero
+    # graph-code duplication) and the patch tensors are returned early,
+    # before any of the finetune-only model machinery. ["on"] is False
+    # during finetune so the headline forward is byte-for-byte unchanged.
+    _pretrain_capture = {"on": False}
 
     def forward_one_day(t_idx: int) -> dict:
         if t_idx < max(w, cw):
@@ -893,6 +1257,10 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
             x_window=x_window, mask_window=mask_window,
             top_neighbors=top_neighbors_day_t, active_idx=active_idx,
         )
+        if _pretrain_capture["on"]:
+            return {"_patches": patches, "_patch_mask": patch_mask,
+                    "_active_mask": active_mask_t, "_active_idx": active_idx,
+                    "_active_idx_np": active_idx_np}
         day_query_key = torch.from_numpy(day_keys[t_idx]).float().to(device)
         regime_scalars = model.ow.day_memory.standardize_query(day_query_key)[[0, 9]].clone()
         if torch.isnan(regime_scalars).any():
@@ -974,31 +1342,195 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
                 "score_rate_all": score_rate_all,
                 "eval_mask": emask}
 
+    # ===== Stage-1 pretrain (ablation arms 1/3, 2026-05-17) =====
+    # Reuses forward_one_day's exact graph-patch construction via the
+    # capture hook (no graph-code duplication). Pretrains ONLY the STAR
+    # backbone (model.ow.backbone) on a day-level objective, saves its
+    # state_dict for Stage-2 --init_backbone_ckpt.
+    if train_cfg.pretrain_objective:
+        obj = train_cfg.pretrain_objective
+        bb = model.ow.backbone
+        d = backbone_cfg.hidden_dim
+        pre_days = np.array(
+            [int(t) for t in train_idx if int(t) >= max(w, cw)],
+            dtype=np.int64,
+        )
+        fp = np.nan_to_num(day_keys.astype(np.float64), nan=0.0)
+        mu = fp[train_idx].mean(0); sd = fp[train_idx].std(0)
+        sd = np.where(sd < 1e-6, 1.0, sd)
+        fp_z = ((fp - mu) / sd).astype(np.float32)  # train-only stats
+        proj = nn.Sequential(
+            nn.Linear(d, d), nn.GELU(), nn.Linear(d, 128),
+        ).to(device)
+        params = list(bb.parameters()) + list(proj.parameters())
+        env_lbl_full = None
+        if obj == "adversarial":
+            n_env = train_cfg.pretrain_n_envs
+            env_lbl_full = np.full(len(dates), -1, dtype=np.int64)
+            env_lbl_full[train_idx] = _kmeans_labels(
+                fp_z[train_idx], n_env, seed,
+            )
+            adv = nn.Sequential(
+                nn.Linear(d, d), nn.GELU(), nn.Linear(d, n_env),
+            ).to(device)
+            params += list(adv.parameters())
+        p_opt = AdamW(params, lr=train_cfg.pretrain_lr, weight_decay=1e-5)
+        _pretrain_capture["on"] = True
+        bb.train()
+        # Each batched day holds a full backbone-forward graph; the
+        # universal panel has ~600 active tickers/day so keep BS small
+        # (env-tunable). InfoNCE still has BS-1 in-batch negatives.
+        import os as _os
+        BS = int(_os.environ.get("PRETRAIN_BS", "8"))
+        n_pre_epochs = 1 if smoke else train_cfg.pretrain_epochs
+        for pe in range(n_pre_epochs):
+            rng_p = np.random.default_rng(seed * 131 + pe)
+            order = rng_p.permutation(pre_days)
+            losses: list[float] = []
+            for s0 in range(0, len(order), BS):
+                batch = order[s0:s0 + BS]
+                embs = []; bdays = []
+                for t_idx in batch:
+                    cap = forward_one_day(int(t_idx))
+                    if not cap:
+                        continue
+                    am = cap["_active_mask"]
+                    if am.sum() < 2:
+                        continue
+                    # Pool the PRE-CS-LN representation: cs_ln forces the
+                    # cross-sectional mean to a per-day constant, so a
+                    # pooled day embedding of the post-norm tensor is
+                    # day-invariant (collapses InfoNCE to ln(K)). The
+                    # pre-norm tensor carries the day-level signal.
+                    _, z_pre = bb.forward_day(
+                        cap["_patches"], cap["_patch_mask"], am,
+                        return_prenorm=True,
+                    )
+                    embs.append(z_pre[am].mean(0)); bdays.append(int(t_idx))
+                if len(embs) < 4:
+                    continue
+                E = torch.stack(embs)
+                # Diagnostic: cross-day embedding spread. ~0 => collapsed
+                # (degenerate pretext); must be clearly > 0 post-fix.
+                if pe == 0 and len(losses) == 0:
+                    _espread = float(E.detach().float().std(0).mean().item())
+                    print(f"[DOW-epiSTAR-v2] pretrain[{obj}] "
+                          f"day-emb spread={_espread:.5f}", flush=True)
+                if obj == "contrastive":
+                    h = torch.nn.functional.normalize(proj(E), dim=-1)
+                    sim = (h @ h.t()) / train_cfg.pretrain_temp
+                    bsz = sim.shape[0]
+                    fpb = torch.from_numpy(
+                        fp_z[np.asarray(bdays)]
+                    ).float().to(device)
+                    dist = torch.cdist(fpb, fpb)
+                    eye = torch.eye(bsz, device=device).bool()
+                    sim = sim.masked_fill(eye, -1e9)
+                    dist = dist.masked_fill(eye, 1e9)
+                    pos = dist.argmin(1)
+                    loss = torch.nn.functional.cross_entropy(sim, pos)
+                else:  # adversarial: gradient-reversal regime classifier
+                    lbl = torch.from_numpy(
+                        env_lbl_full[np.asarray(bdays)]
+                    ).long().to(device)
+                    logits = adv(_grad_reverse(E, 1.0))
+                    loss = torch.nn.functional.cross_entropy(logits, lbl)
+                p_opt.zero_grad(); loss.backward(); p_opt.step()
+                losses.append(float(loss.item()))
+                if smoke and len(losses) >= 5:
+                    break
+            print(f"[DOW-epiSTAR-v2] pretrain[{obj}] epoch {pe}: "
+                  f"loss={(np.mean(losses) if losses else 0.0):.4f}",
+                  flush=True)
+        _pretrain_capture["on"] = False
+        out_dir = Path(train_cfg.output_dir)
+        (out_dir / "_ckpt").mkdir(parents=True, exist_ok=True)
+        bb_ckpt = out_dir / f"_ckpt/fold{fold}_backbone.pt"
+        torch.save(bb.state_dict(), bb_ckpt)
+        print(f"[DOW-epiSTAR-v2] saved backbone ckpt -> {bb_ckpt}",
+              flush=True)
+        if train_cfg.pretrain_only:
+            print("[DOW-epiSTAR-v2] --pretrain_only: stage 1 done; "
+                  "exiting.", flush=True)
+            return
+
     step = 0; smoke_step_cap = 80
     for epoch in range(train_cfg.epochs):
         model.train()
         np.random.seed(seed + epoch)
         perm = np.random.permutation(train_idx)
         epoch_losses: list[float] = []
-        for t_idx in perm:
-            t_idx = int(t_idx)
-            if t_idx < max(w, cw):
-                continue
-            out = forward_one_day(t_idx)
-            if not out:
-                continue
-            loss_mask_t = torch.from_numpy(loss_mask[t_idx]).to(device)
-            y_true_t = torch.from_numpy(y[t_idx]).to(device)
-            loss = cs_mse_loss(out["y_hat"], y_true_t, loss_mask_t)
-            optim.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.unscale_(optim)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
-            scaler.step(optim); scaler.update(); scheduler.step()
-            epoch_losses.append(float(loss.item()))
-            step += 1
-            if smoke and step >= smoke_step_cap:
-                break
+
+        if train_cfg.vrex_beta > 0:
+            # Arm 2: regime-balanced V-REx. Each step draws one day from
+            # every macro-regime environment, computes per-env risk, and
+            # penalises the variance of env risks (Krueger et al. 2021).
+            rng_e = np.random.default_rng(seed + epoch)
+            env_days: dict[int, np.ndarray] = {}
+            for e in range(train_cfg.vrex_n_envs):
+                de = np.array(
+                    [int(t) for t in train_idx
+                     if int(t) >= max(w, cw) and vrex_env_of_day[int(t)] == e],
+                    dtype=np.int64,
+                )
+                if de.size:
+                    env_days[e] = rng_e.permutation(de)
+            if env_days:
+                n_steps = max(len(v) for v in env_days.values())
+                for i in range(n_steps):
+                    env_losses = []
+                    for e, de in env_days.items():
+                        t_idx = int(de[i % len(de)])
+                        out = forward_one_day(t_idx)
+                        if not out:
+                            continue
+                        lm = torch.from_numpy(loss_mask[t_idx]).to(device)
+                        yt = torch.from_numpy(y[t_idx]).to(device)
+                        le = cs_mse_loss(out["y_hat"], yt, lm)
+                        if le.requires_grad:
+                            env_losses.append(le)
+                    if not env_losses:
+                        continue
+                    stacked = torch.stack(env_losses)
+                    total = stacked.mean()
+                    if stacked.numel() >= 2:
+                        total = total + train_cfg.vrex_beta * stacked.var(unbiased=False)
+                    optim.zero_grad()
+                    scaler.scale(total).backward()
+                    scaler.unscale_(optim)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+                    scaler.step(optim); scaler.update(); scheduler.step()
+                    epoch_losses.append(float(stacked.mean().item()))
+                    step += 1
+                    if smoke and step >= smoke_step_cap:
+                        break
+        else:
+            for t_idx in perm:
+                t_idx = int(t_idx)
+                if t_idx < max(w, cw):
+                    continue
+                out = forward_one_day(t_idx)
+                if not out:
+                    continue
+                loss_mask_t = torch.from_numpy(loss_mask[t_idx]).to(device)
+                y_true_t = torch.from_numpy(y[t_idx]).to(device)
+                loss = cs_mse_loss(out["y_hat"], y_true_t, loss_mask_t)
+                if not loss.requires_grad:
+                    # Degenerate batch (<2 tickers pass loss_mask); cs_mse_loss
+                    # returns a no-grad sentinel. Skip the backward instead of
+                    # crashing on `element 0 of tensors does not require grad`.
+                    # Observed on F4/F5 walks where the train-perm head occasionally
+                    # lands on a day with too-few loss-eligible cells.
+                    continue
+                optim.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.unscale_(optim)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+                scaler.step(optim); scaler.update(); scheduler.step()
+                epoch_losses.append(float(loss.item()))
+                step += 1
+                if smoke and step >= smoke_step_cap:
+                    break
 
         train_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
         val_metrics = evaluate(val_idx, eval_mask_arr=loss_mask)
@@ -1020,8 +1552,10 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
                 print(f"[DOW-epiSTAR-v2] early stop at epoch {epoch}")
                 break
 
-    if best_state is not None:
+    if best_state is not None and not use_final_state:
         model.load_state_dict(best_state)
+    if use_final_state:
+        print(f"[DOW-epiSTAR-v2] use_final_state=True; evaluating last-epoch state (best_val_ic={best_val_ic:.4f} ignored)")
     test_metrics = evaluate(test_idx, eval_mask_arr=loss_mask)
     val_metrics_final = evaluate(val_idx, eval_mask_arr=loss_mask)
 
@@ -1089,12 +1623,53 @@ def main(cfg_path: str, fold: int, seed: int, smoke: bool = False) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=str, default="configs/dow_epistar_v2.yaml")
-    p.add_argument("--fold", type=int, choices=[1, 2, 3], required=True)
+    p.add_argument("--fold", type=int, choices=[1, 2, 3, 4, 5], required=True)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--smoke", action="store_true")
+    p.add_argument("--epochs", type=int, default=None,
+                   help="Override config epochs; also disables early-stop.")
+    p.add_argument("--use_final_state", action="store_true",
+                   help="Evaluate last-epoch state instead of best-val state.")
+    p.add_argument("--output_dir", type=str, default=None,
+                   help="Override config output_dir.")
+    p.add_argument("--reverse_time_val", action="store_true",
+                   help="Use fixed historical val (2017) and two-segment train. "
+                        "Diagnostic for val-regime overfit.")
+    p.add_argument("--two_regime_val", action="store_true",
+                   help="Use val = 2017 H2 + 2018 H2 (calm + vol-spike mix). "
+                        "Mutually exclusive with --reverse_time_val.")
+    p.add_argument("--vrex_beta", type=float, default=None,
+                   help="Ablation arm 2: V-REx variance-of-environment-risk "
+                        "penalty weight. 0.0/unset = original headline path.")
+    p.add_argument("--vrex_n_envs", type=int, default=None,
+                   help="Number of macro-regime environments for V-REx.")
+    p.add_argument("--init_backbone_ckpt", type=str, default=None,
+                   help="Ablation arms 1/3: STARBackbone state_dict to load "
+                        "before finetuning (Stage-2 of two-stage pretrain).")
+    p.add_argument("--pretrain_objective", type=str, default=None,
+                   choices=["contrastive", "adversarial"],
+                   help="Ablation arms 1/3 Stage-1: pretrain the STAR "
+                        "backbone with this day-level objective.")
+    p.add_argument("--pretrain_only", action="store_true",
+                   help="Run Stage-1 pretrain, save backbone ckpt, exit.")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args.config, args.fold, args.seed, smoke=args.smoke)
+    main(
+        args.config,
+        args.fold,
+        args.seed,
+        smoke=args.smoke,
+        epochs_override=args.epochs,
+        use_final_state=args.use_final_state,
+        output_dir_override=args.output_dir,
+        reverse_time_val=args.reverse_time_val,
+        two_regime_val=args.two_regime_val,
+        vrex_beta=args.vrex_beta,
+        vrex_n_envs=args.vrex_n_envs,
+        init_backbone_ckpt=args.init_backbone_ckpt,
+        pretrain_objective=args.pretrain_objective,
+        pretrain_only=args.pretrain_only,
+    )

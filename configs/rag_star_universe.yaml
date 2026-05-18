@@ -1,0 +1,86 @@
+# RAG-STAR Universe: RAG-STAR architecture trained and evaluated on the
+# same LATTICE panel that SWA-InVAR / MAiT consume, for an apples-to-apples
+# head-to-head. Same 22-col v2 schema is rebuilt from LATTICE artefacts via
+# src/v2/data/lattice_panel.py (price-col rename + fundamental-substitution +
+# stocktwits-join; ST col names auto-mapped to LATTICE ST col names).
+#
+# Locked hyperparameters from universal_validation_full.yaml; only the
+# panel_kind switch changes plus output_dir.
+
+train:
+  panel_kind: "lattice"
+  panel_start: "2015-01-09"
+  panel_end: "2023-12-31"   # cover F1/F2/F3 canonical; auxiliary parquets cap at 2023-01
+  horizon_days: 5
+  universe_csv: "data/raw/biotech_universe_v1.csv"  # unused when panel_kind=lattice
+  epochs: 10
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  early_stop_patience: 3
+  correlation_window: 60
+  correlation_shrinkage_tau: 30.0
+  min_overlap_absolute: 5
+  output_dir: "results/rag_star_universe"
+  disable_macro_duration: false
+  disable_lambda_macro: false
+  disable_score_duration: false
+  shuffle_macro_state: false
+  shuffle_duration_input: false
+  random_ipo_retrieval: false
+  shuffle_age_features: false
+  disable_correlation_shrinkage: false
+  use_rate_memory: true
+  disable_alpha_rate: false
+  disable_score_rate: false
+  random_rate_retrieval: false
+  use_duration_graph: true
+  duration_graph_min_warmup_days: 0
+  duration_graph_source: "deterministic_features"
+  graph_mode: "learned_blend"
+
+backbone:
+  feature_dim: 22
+  hidden_dim: 128
+  num_neighbors: 8
+  temporal_window: 20
+  num_heads: 4
+  num_layers: 2
+  ff_dim: 256
+  dropout: 0.1
+
+day_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  retrieval_mode: "raw_key"
+  random_retrieval: false
+
+ipo_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  max_age_days: 756
+  random_retrieval: false
+
+rate_memory:
+  top_m: 8
+  horizon_days: 5
+  embargo_days: 5
+  random_retrieval: false
+
+model:
+  episode_value_dim: 32
+  ipo_value_dim: 32
+  cross_attn_heads: 4
+  gate_hidden_dim: 64
+  head_hidden_dim: 64
+  head_dropout: 0.1
+  duration_dim: 32
+  duration_hidden_dim: 64
+  duration_dropout: 0.1
+  macro_dim: 32
+  macro_hidden_dim: 64
+  macro_gate_state_dim: 16
+  macro_dropout: 0.1
