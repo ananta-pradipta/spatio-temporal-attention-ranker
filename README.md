@@ -3,24 +3,22 @@
 **RAG-STAR** is a Regime-Adaptive Retrieval-Augmented Graph with
 Spatio-Temporal Attention for Cross-Sectional Stock Ranking.
 
-Cross-sectional stock ranking on broad equity universes is difficult under
-regime stress. Models are typically trained on calm market windows but tested
-across drawdowns, rate shocks, and post-shock rebounds, while index
-reconstitution simultaneously reshapes the universe. RAG-STAR is a
-regime-adaptive retrieval-augmented temporal graph network that combines a
-spatio-temporal attention backbone with a day-level regime-memory retrieval
-bank reusing historically similar trading days, a macro-conditioned dynamic
-graph blending a survivorship-corrected correlation graph with a
-rate-sensitivity graph, and a regime-gated macro rate-sensitivity head. On a
-600-ticker broad S&P 500 panel (2015-2025), evaluated under a leakage-audited
-5-fold walk-forward protocol with a two-regime validation window, RAG-STAR
-attains the strongest pooled information coefficient among six retuned
+## Abstract
+
+Cross-sectional stock ranking on broad equity universes degrades under regime
+stress: models trained on calm windows are tested across drawdowns, rate
+shocks, and rebounds while the index universe itself reshapes. RAG-STAR is a
+regime-adaptive retrieval-augmented temporal graph network combining a
+spatio-temporal attention backbone, a day-level regime-memory bank that reuses
+similar past trading days, a macro-conditioned graph blending a
+survivorship-corrected correlation graph with a rate-sensitivity graph, and a
+regime-gated macro rate-sensitivity head. On a 600-ticker S&P 500 panel
+(2015-2025) under a leakage-audited 5-fold walk-forward protocol, it attains
+the strongest pooled information coefficient among six retuned
 state-of-the-art baselines and is the most regime-balanced, with the smallest
-deficit on the hardest rate-rotation fold; the result is positioned as
-consistent performance across heterogeneous market regimes rather than a
-one-fold advantage. A biotech-sector case study shows the architecture
-transfers without modification to a narrower, higher-shock-density universe,
-where it specialises further and attains its strongest result.
+deficit on the hardest rate-rotation fold. The architecture transfers without
+modification to a narrower, higher-shock-density biotech universe, where it
+specialises further.
 
 This repository is the public code mirror; paper drafts and internal
 design documents are kept in a private repository.
