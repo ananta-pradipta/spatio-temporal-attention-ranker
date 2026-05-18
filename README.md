@@ -1,30 +1,45 @@
 # Spatio-Temporal Attention Ranker (RAG-STAR)
 
-**RAG-STAR** is a Regime-Adaptive Retrieval-Augmented Graph for cross-sectional
-equity ranking. This README documents the **universal variant**, trained and
-evaluated on a broad S&P 500 panel. The model combines a spatio-temporal
-attention backbone, a day-level regime memory, a macro-conditioned dynamic
-graph blending correlation and rate sensitivity, a regime-gated additive
-macro rate-sensitivity head, and a rate-shock memory.
+**RAG-STAR** is a Regime-Adaptive Retrieval-Augmented Graph with
+Spatio-Temporal Attention for Cross-Sectional Stock Ranking.
+
+Cross-sectional stock ranking on broad equity universes is difficult under
+regime stress. Models are typically trained on calm market windows but tested
+across drawdowns, rate shocks, and post-shock rebounds, while index
+reconstitution simultaneously reshapes the universe. RAG-STAR is a
+regime-adaptive retrieval-augmented temporal graph network that combines a
+spatio-temporal attention backbone with a day-level regime-memory retrieval
+bank reusing historically similar trading days, a macro-conditioned dynamic
+graph blending a survivorship-corrected correlation graph with a
+rate-sensitivity graph, and a regime-gated macro rate-sensitivity head. On a
+600-ticker broad S&P 500 panel (2015-2025), evaluated under a leakage-audited
+5-fold walk-forward protocol with a two-regime validation window, RAG-STAR
+attains the strongest pooled information coefficient among six retuned
+state-of-the-art baselines and is the most regime-balanced, with the smallest
+deficit on the hardest rate-rotation fold; the result is positioned as
+consistent performance across heterogeneous market regimes rather than a
+one-fold advantage. A biotech-sector case study shows the architecture
+transfers without modification to a narrower, higher-shock-density universe,
+where it specialises further and attains its strongest result.
 
 This repository is the public code mirror; paper drafts and internal
 design documents are kept in a private repository.
 
-## What changed from the biotech variant
+## Motivation: regime variety over the study period
 
-The original RAG-STAR was tuned on a 244-ticker biotech panel and carried an
-open-world IPO analogue memory. The universal variant generalises the model to
-a broad-market S&P 500 panel. The IPO analogue memory bank is **deactivated**
-on the universal panel (it remains in the config for the biotech setting);
-broad-market performance comes instead from the day-level regime memory, the
-macro-conditioned graph blend, and the macro rate-sensitivity components acting
-jointly.
+![Macro regime variety across the study period](docs/figures/fig1_regime_variety.png)
+
+Macro regime variety over the 600-ticker broad S&P 500 study period
+(2015-2025): the CBOE VIX and the 10-year US Treasury yield, with the five
+walk-forward test windows (F1-F5) shaded. The folds span a near-zero-rate
+COVID shock, the 2022 rate-hike climb, and post-shock normalisation. A model
+trained on calm windows must generalise across all of these.
 
 ## Architecture
 
 ![RAG-STAR pipeline](docs/figures/architecture_overview.png)
 
-The universal pipeline has five active stages:
+The pipeline has five active stages:
 
 1. **Inputs** — 26 modelled per-(day, ticker) features (10 price/volume,
    4 distress, 4 intangibles, 3 other fundamentals, 3 catalyst, 2 flags),
@@ -61,7 +76,7 @@ or learned identity tables. Every component is a function of observable
 per-(day, ticker) features, so the model can score never-before-seen tickers
 at inference time given at least 20 trading days of history.
 
-## Universal panel and protocol
+## Panel and protocol
 
 - **Universe**: point-in-time S&P 500 historical constituents, 2015-01-09 to
   2025-12-23. 600 ever-membered names, roughly 500 active per day, 2,755
@@ -84,12 +99,12 @@ per-column best.
 
 | Model        | Type                       | Venue    | F1        | F2         | F3        | F4        | F5        | 5-fold pooled IC | Rank IC   |
 |--------------|----------------------------|----------|-----------|------------|-----------|-----------|-----------|------------------|-----------|
-| StockMixer   | MLP-Mixer                  | AAAI'24  | +0.0133   | -0.0111    | +0.0149   | +0.0135   | +0.0093   | +0.0080          | +0.0118   |
-| MERA         | MoE retrieval              | WWW'25   | +0.0322   | -0.0094    | +0.0083   | +0.0097   | -0.0012   | +0.0079          | +0.0153   |
-| iTransformer | Variate-token Transformer  | ICLR'24  | +0.0327   | -0.0247    | +0.0222   | +0.0165   | +0.0155   | +0.0124          | +0.0198   |
-| DySTAGE      | Spatio-temporal graph      | ICAIF'24 | +0.0275   | -0.0066    | +0.0137   | +0.0160   | +0.0117   | +0.0124          | +0.0194   |
-| FactorVAE    | Probabilistic factor       | AAAI'22  | +0.0457   | -0.0147    | +0.0235   | +0.0248   | +0.0216   | +0.0202          | +0.0259   |
-| MASTER       | Market-guided Transformer  | AAAI'24  | **+0.0552** | -0.0158  | +0.0210   | +0.0235   | +0.0200   | +0.0208          | **+0.0274** |
+| StockMixer [[3]](#references)   | MLP-Mixer            | AAAI'24  | +0.0133   | -0.0111    | +0.0149   | +0.0135   | +0.0093   | +0.0080          | +0.0118   |
+| MERA [[5]](#references)         | MoE retrieval        | WWW'25   | +0.0322   | -0.0094    | +0.0083   | +0.0097   | -0.0012   | +0.0079          | +0.0153   |
+| iTransformer [[6]](#references) | Variate-token Transformer | ICLR'24 | +0.0327 | -0.0247  | +0.0222   | +0.0165   | +0.0155   | +0.0124          | +0.0198   |
+| DySTAGE [[1]](#references)      | Spatio-temporal graph | ICAIF'24 | +0.0275  | -0.0066    | +0.0137   | +0.0160   | +0.0117   | +0.0124          | +0.0194   |
+| FactorVAE [[7]](#references)    | Probabilistic factor | AAAI'22  | +0.0457   | -0.0147    | +0.0235   | +0.0248   | +0.0216   | +0.0202          | +0.0259   |
+| MASTER [[4]](#references)       | Market-guided Transformer | AAAI'24 | **+0.0552** | -0.0158 | +0.0210 | +0.0235   | +0.0200   | +0.0208          | **+0.0274** |
 | **RAG-STAR (ours)** | Retrieval-augmented graph | --- | +0.0416 | **-0.0050** | **+0.0301** | **+0.0311** | +0.0089 | **+0.0213** | +0.0265 |
 
 RAG-STAR attains the strongest 5-fold pooled IC (+0.0213), with MASTER
@@ -99,6 +114,12 @@ and F4, and FactorVAE takes F5. No architecture is positive on all five folds
 and every one turns negative on F2; RAG-STAR has the smallest absolute F2
 deficit, so the rate-stress gap is regime-mediated rather than RAG-STAR
 specific.
+
+![Cumulative-average daily IC across the five test folds](docs/figures/fig5_regime_folds.png)
+
+Cumulative-average daily IC across the five concatenated test folds: RAG-STAR
+(bold) versus the baseline min-max envelope. The folds span distinct post-2015
+regime archetypes; F2 and F5 carry the largest train-to-test covariate shift.
 
 ## Long-short portfolio performance
 
@@ -146,12 +167,12 @@ graph carry the load, the two largest F2 degradations in the ablation.
 - `src/v2/` — RAG-STAR architecture and training: spatio-temporal attention
   backbone, day-level regime memory, macro-conditioned dynamic graph
   blending, macro rate-sensitivity head, rate-shock memory, and the
-  universal-panel data builders.
+  broad-panel data builders.
 - `src/baselines/` — cross-sectional ranking baselines (MASTER, FactorVAE,
   StockMixer, iTransformer, DySTAGE, MERA, RSR) retrained under the same
   walk-forward protocol; vendored upstream code under
   `src/baselines/vendored/`.
-- `configs/` — YAML configs for the headline universal model
+- `configs/` — YAML configs for the headline broad-panel model
   (`rag_star_universe_v2.yaml`) and ablation variants.
 - `scripts/` — analysis utilities (per-day IC extraction, portfolio
   backtest, quintile-monotonicity charting) and SLURM dispatchers under
@@ -159,7 +180,7 @@ graph carry the load, the two largest F2 degradations in the ablation.
 
 ## Reproducing experiments
 
-Single (fold, seed) training run for the headline universal model:
+Single (fold, seed) training run for the headline broad-panel model:
 
 ```bash
 python -m src.v2.training.train_dow_epistar \
@@ -174,7 +195,7 @@ Full 5-fold by 5-seed sweep via SLURM:
 sbatch scripts/wulver/rag_star_universe_v2_two_regime_val_sweep.sbatch
 ```
 
-Baselines under the universal two-regime-validation protocol:
+Baselines under the broad-panel two-regime-validation protocol:
 
 ```bash
 sbatch scripts/wulver/baselines_universal_two_regime_val_sweep.sbatch
@@ -192,3 +213,32 @@ predictions:
 ```bash
 python scripts/portfolio_analysis.py
 ```
+
+## References
+
+1. Gu, J., Ye, J., Uddin, A., and Wang, G. (2024). "DySTAGE: Dynamic Graph
+   Representation Learning for Asset Pricing via Spatio-Temporal Attention and
+   Graph Encodings." In *Proceedings of the 5th ACM International Conference
+   on AI in Finance (ICAIF)*, pp. 388-396. ACM.
+2. Feng, F., He, X., Wang, X., Luo, C., Liu, Y., and Chua, T.-S. (2019).
+   "Temporal Relational Ranking for Stock Prediction." *ACM Transactions on
+   Information Systems (TOIS)*, 37(2), 1-30.
+3. Fan, J., and Shen, Y. (2024). "StockMixer: A Simple yet Strong MLP-based
+   Architecture for Stock Price Forecasting." In *Proceedings of the AAAI
+   Conference on Artificial Intelligence (AAAI)*, 38(8), 8389-8397.
+4. Li, T., Liu, Z., Shen, Y., Wang, X., Chen, H., and Huang, S. (2024).
+   "MASTER: Market-Guided Stock Transformer for Stock Price Forecasting." In
+   *Proceedings of the AAAI Conference on Artificial Intelligence (AAAI)*.
+5. Liu, Y., Song, C., Liu, P., Li, N., Dai, T., Bao, J., Jiang, Y., Xia, S.,
+   Long, G., Bluestein, M., Chang, Y., Lewin-Eytan, L., Huang, H., and
+   Yom-Tov, E. (2025). "MERA: Mixture of Experts with Retrieval-Augmented
+   Representation for Modeling Diversified Stock Patterns." In *Companion
+   Proceedings of the ACM Web Conference (WWW Companion)*.
+6. Liu, Y., Hu, T., Zhang, H., Wu, H., Wang, S., Ma, L., and Long, M. (2024).
+   "iTransformer: Inverted Transformers Are Effective for Time Series
+   Forecasting." In *International Conference on Learning Representations
+   (ICLR)*.
+7. Duan, Y., Wang, L., Zhang, Q., and Li, J. (2022). "FactorVAE: A
+   Probabilistic Dynamic Factor Model Based on Variational Autoencoder for
+   Predicting Cross-Sectional Stock Returns." In *Proceedings of the AAAI
+   Conference on Artificial Intelligence (AAAI)*.
