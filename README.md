@@ -1,4 +1,4 @@
-# Spatio-Temporal Attention Ranker (RAG-STAR)
+# Retrieval-Augmented Graph with Spatio-Temporal Attention Ranker (RAG-STAR)
 
 **RAG-STAR** is a Regime-Adaptive Retrieval-Augmented Graph with
 Spatio-Temporal Attention for Cross-Sectional Stock Ranking.
